@@ -89,7 +89,6 @@ Right-click gives you, per joined network:
 and, for the service itself: start, stop, restart, start with the system, and a
 checkbox that allows ZeroTier's UDP ports in a firewalld zone.
 
-![Networks tab](docs/tab-networks.png)
 
 ## Who else is connected
 
@@ -113,8 +112,6 @@ A member only lands in the neighbour table after it has actually exchanged a
 packet with this machine. **Scan the subnet for members** pings the /24 you were
 assigned so they all appear at once; it touches nothing but your own virtual
 network.
-
-![Members tab](docs/tab-members.png)
 
 ZeroTier's own roots and the network controller are hidden by default — they are
 infrastructure, not people. There is a checkbox to show them.
@@ -147,8 +144,6 @@ firewalld already knows, a network ID must be sixteen hex digits. The ports it
 opens are never taken from the caller — it reads them back out of the running
 service. When it writes into your home directory it drops to your uid first, so
 root never follows a path you control.
-
-![Service tab](docs/tab-service.png)
 
 ## The firewall button
 
