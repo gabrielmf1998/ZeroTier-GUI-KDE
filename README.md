@@ -188,10 +188,10 @@ The short way — picks the right package for your distro, installs
 `zerotier-one` first if it is missing, and starts it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/ZeroTier-Tray-KDE/main/install-online.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/ZeroTier-GUI-KDE/main/install-online.sh | sh
 ```
 
-Or grab a package from [Releases](https://github.com/gabrielmf1998/ZeroTier-Tray-KDE/releases):
+Or grab a package from [Releases](https://github.com/gabrielmf1998/ZeroTier-GUI-KDE/releases):
 
 | Distro | Package | Command |
 |---|---|---|

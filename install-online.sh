@@ -3,12 +3,12 @@
 # a daemon that is not there is useless), then installs the matching package
 # from the latest GitHub release. Unknown distros get the AppImage.
 #
-#   curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/ZeroTier-Tray-KDE/main/install-online.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/ZeroTier-GUI-KDE/main/install-online.sh | sh
 #
 # Not affiliated with ZeroTier, Inc.
 set -eu
 
-REPO="gabrielmf1998/ZeroTier-Tray-KDE"
+REPO="gabrielmf1998/ZeroTier-GUI-KDE"
 API="https://api.github.com/repos/$REPO/releases/latest"
 ZT_INSTALLER="https://install.zerotier.com"
 info() { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }

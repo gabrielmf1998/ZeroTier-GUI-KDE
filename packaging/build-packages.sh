@@ -8,7 +8,7 @@ BIN=zerotier-tray
 VERSION=1.0.1
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
-URL="https://github.com/gabrielmf1998/ZeroTier-Tray-KDE"
+URL="https://github.com/gabrielmf1998/ZeroTier-GUI-KDE"
 SUMMARY="Unofficial tray icon to run and control ZeroTier One"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

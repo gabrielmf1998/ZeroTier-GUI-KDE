@@ -6,7 +6,7 @@ Release:        1%{?dist}
 Summary:        Unofficial tray icon to run and control ZeroTier One
 
 License:        MIT
-URL:            https://github.com/gabrielmf1998/ZeroTier-Tray-KDE
+URL:            https://github.com/gabrielmf1998/ZeroTier-GUI-KDE
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
