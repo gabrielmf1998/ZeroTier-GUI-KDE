@@ -46,6 +46,38 @@ def systemctl(*args) -> int:
     return subprocess.run(["systemctl", *args]).returncode
 
 
+def unit_property(name: str) -> str:
+    r = subprocess.run(["systemctl", "show", SERVICE, "-p", name, "--value"],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+# Deaths on the way down, as opposed to a unit that would not start. Only these
+# get cleared: a service that failed to come up must stay visibly failed.
+SHUTDOWN_FAILURES = ("core-dump", "signal", "timeout", "watchdog")
+
+
+def clear_shutdown_failure() -> str:
+    """Take the unit out of 'failed' when it died while being stopped.
+
+    zerotier-one can segfault on SIGTERM - its control-plane HTTP server does
+    not always survive having a client attached when the signal lands. The stop
+    still happened and the daemon is gone, so leaving a red unit behind (and in
+    `systemctl --failed` for ever) reports something that is not true. Returns a
+    note to show the user, or "".
+    """
+    if subprocess.run(["systemctl", "is-failed", "--quiet", SERVICE]).returncode != 0:
+        return ""
+    result = unit_property("Result")
+    if result not in SHUTDOWN_FAILURES:
+        return ""
+    signal_name = unit_property("ExecMainStatus")
+    systemctl("reset-failed", SERVICE)
+    return (f"zerotier-one crashed on the way down (result: {result}, "
+            f"signal {signal_name}). It is stopped; the failed state has been "
+            f"cleared.")
+
+
 # ── validation ──────────────────────────────────────────────
 
 def target_user(name: str) -> pwd.struct_passwd:
@@ -238,8 +270,24 @@ def main() -> int:
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
-    if cmd in ("start", "stop", "restart"):
-        return systemctl(cmd, SERVICE)
+    if cmd == "start":
+        return systemctl("start", SERVICE)
+    if cmd == "stop":
+        rc = systemctl("stop", SERVICE)
+        note = clear_shutdown_failure()
+        if note:
+            print(note)
+            return 0
+        return rc
+    if cmd == "restart":
+        # Stop and start by hand rather than `systemctl restart`: if the daemon
+        # dies on the way down, restart gives up and never starts it again.
+        systemctl("stop", SERVICE)
+        note = clear_shutdown_failure()
+        rc = systemctl("start", SERVICE)
+        if note and rc == 0:
+            print(note)
+        return rc
     if cmd == "enable":
         return systemctl("enable", "--now", SERVICE)
     if cmd == "disable":

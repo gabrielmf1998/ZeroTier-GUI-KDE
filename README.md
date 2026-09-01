@@ -150,6 +150,35 @@ root never follows a path you control.
 
 ![Service tab](docs/tab-service.png)
 
+## Stopping the service
+
+**Stop** used to leave the unit sitting in `failed`. `zerotier-one` sometimes
+dies with `SIGSEGV` on its way down — the stack trace lands in the thread pool
+of its own control-plane HTTP server — and systemd quite correctly reports
+`Result=core-dump`. The daemon *is* stopped; the tray just made it look like
+something had gone badly wrong, and left a red unit in `systemctl --failed`.
+
+The crash is intermittent, and honestly so: it turned up six times in a row at
+first, and then would not reproduce in thirty-four consecutive stops afterwards.
+An A/B at the same uptime — polling the API the whole time versus never
+touching it — came out clean on both sides. So the trigger is **not** pinned
+down, and nothing here should be read as a diagnosis of the daemon.
+
+What the tray does about it:
+
+- **The unit never stays failed after a stop it asked for.** The helper checks
+  the failure result and clears it, but *only* for a death by signal, watchdog
+  or timeout — a shutdown-path failure. A unit that failed to **start** stays
+  visibly failed, because that is a real problem you need to see. The tray then
+  says out loud that the daemon crashed on the way down; it does not hide it.
+- **`restart` is a stop and a start**, not `systemctl restart`. If the daemon
+  dies while stopping, `systemctl restart` gives up and leaves it down; doing
+  the two halves by hand means it always comes back.
+- **The tray lets go before a stop**, pausing its polling and dropping the
+  connection cache. This is precaution, not a proven cure: you should not hold
+  a socket open to a process you are about to SIGTERM. It costs nothing and it
+  removes the tray from the list of suspects.
+
 ## The firewall button
 
 ZeroTier still works behind a closed firewall, by relaying through a root
@@ -197,9 +226,9 @@ Or grab a package from [Releases](https://github.com/gabrielmf1998/ZeroTier-Tray
 
 | Distro | Package | Command |
 |---|---|---|
-| Fedora / RHEL | `.rpm` | `sudo dnf install ./zerotier-tray-kde-1.0.0-1.fc46.noarch.rpm` |
-| Debian / Ubuntu | `.deb` | `sudo apt install ./zerotier-tray-kde_1.0.0-1_all.deb` |
-| Arch / Manjaro | `.pkg.tar.zst` | `sudo pacman -U zerotier-tray-kde-1.0.0-1-any.pkg.tar.zst` |
+| Fedora / RHEL | `.rpm` | `sudo dnf install ./zerotier-tray-kde-1.0.1-1.fc46.noarch.rpm` |
+| Debian / Ubuntu | `.deb` | `sudo apt install ./zerotier-tray-kde_1.0.1-1_all.deb` |
+| Arch / Manjaro | `.pkg.tar.zst` | `sudo pacman -U zerotier-tray-kde-1.0.1-1-any.pkg.tar.zst` |
 | anything else | `.AppImage` | `chmod +x ZeroTier-Tray-KDE-x86_64.AppImage && ./ZeroTier-Tray-KDE-x86_64.AppImage` |
 
 Or from a clone: `./install.sh`.

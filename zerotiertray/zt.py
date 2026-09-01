@@ -117,6 +117,8 @@ class LocalApi(QObject):
         self.host = "127.0.0.1"
         self.port = DEFAULT_PORT
         self.token = ""
+        self._live: set = set()
+        self._generation = 0
 
     def configure(self, host: str, port: int, token: str) -> None:
         self.host, self.port, self.token = host, int(port), token
@@ -135,11 +137,17 @@ class LocalApi(QObject):
         return req
 
     def _dispatch(self, reply: QNetworkReply, callback) -> None:
+        generation = self._generation
+        self._live.add(reply)
+
         def finished() -> None:
+            self._live.discard(reply)
             err = reply.error()
             raw = bytes(reply.readAll())
             status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
             reply.deleteLater()
+            if generation != self._generation:
+                return                       # abandoned by quiesce(); say nothing
             if err != QNetworkReply.NoError and not raw:
                 callback(False, None, reply.errorString())
                 return
@@ -176,6 +184,23 @@ class LocalApi(QObject):
             callback(False, None, "No auth token.")
             return
         self._dispatch(self._nam.deleteResource(self._request(path)), callback)
+
+    def quiesce(self) -> None:
+        """Let go of the daemon completely: in-flight requests and sockets.
+
+        zerotier-one sometimes dies with SIGSEGV while being stopped, in its
+        control-plane HTTP server's thread pool. It is intermittent and its
+        trigger was never pinned down, so this is precaution rather than a
+        proven cure: do not hold a connection open to something that is about
+        to get SIGTERM. Keep-alive means dropping the timers is not enough on
+        its own, hence the connection cache. Replies that land afterwards are
+        discarded instead of being reported as errors.
+        """
+        self._generation += 1
+        for reply in list(self._live):
+            reply.abort()
+        self._live.clear()
+        self._nam.clearConnectionCache()
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +239,8 @@ class ZeroTierMonitor(QObject):
         self._neigh: dict[str, str] = {}
         self._lan: list[tuple[str, str]] = []
         self._fw_cache: tuple | None = None
+        self._api_paused = False
+        self._svc_seen = False
         self._first_pass = True
 
         self._svc_timer = QTimer(self)
@@ -234,12 +261,46 @@ class ZeroTierMonitor(QObject):
     def shutdown(self) -> None:
         for t in (self._svc_timer, self._api_timer, self._peer_timer):
             t.stop()
+        self.api.quiesce()
 
     def reload_intervals(self) -> None:
         self.unit = str(self.cfg.get("service_name", "zerotier-one.service"))
         self._svc_timer.start(max(1000, int(self.cfg.get("service_poll_ms", 4000))))
+        if self._api_paused:
+            return
         self._api_timer.start(max(500, int(self.cfg.get("status_poll_ms", 2000))))
         self._peer_timer.start(max(1000, int(self.cfg.get("peer_poll_ms", 5000))))
+
+    # ------------------------------------------------ getting out of the way
+    def watch_privileged(self, priv) -> None:
+        """Let go of the daemon around any action that takes the unit down."""
+        priv.started.connect(self._priv_started)
+        priv.result.connect(self._priv_finished)
+
+    def _priv_started(self, command: str) -> None:
+        if command.split(" ")[0] in ("stop", "restart"):
+            self.pause_api()
+
+    def _priv_finished(self, _ok: bool, _message: str) -> None:
+        self.poll_service()
+        if self._api_paused:
+            QTimer.singleShot(2000, self.resume_api)
+
+    def pause_api(self) -> None:
+        """Stop touching the local API, and drop the connections we hold."""
+        self._api_paused = True
+        self._api_timer.stop()
+        self._peer_timer.stop()
+        self.api.quiesce()
+
+    def resume_api(self) -> None:
+        if not self._api_paused:
+            return
+        self._api_paused = False
+        self._api_timer.start(max(500, int(self.cfg.get("status_poll_ms", 2000))))
+        self._peer_timer.start(max(1000, int(self.cfg.get("peer_poll_ms", 5000))))
+        self.poll_status()
+        self.poll_peers()
 
     def reload_token(self) -> None:
         home = self.cfg.home_dir()
@@ -259,6 +320,7 @@ class ZeroTierMonitor(QObject):
             lines = out.splitlines()
             active = lines[0].strip() if lines else ""
             enabled = lines[1].strip() if len(lines) > 1 else ""
+            self._svc_seen = True
             self.installed = bool(enabled) and enabled != "not-found"
             self.unit_state = active
             was_running = self.running
@@ -298,6 +360,16 @@ class ZeroTierMonitor(QObject):
         system.run_async("ip", ["-json", "route", "get", "1.1.1.1"], got, self, 6000)
 
     def poll_status(self) -> None:
+        if self._api_paused:
+            return
+        if self._svc_seen and not self.running:
+            # No point knocking, and it narrows the window if somebody stops
+            # the unit from a terminal while we are mid-poll.
+            self.api_ok = False
+            self.status = {}
+            self.networks = []
+            self._settle()
+            return
         if not self.api.ready:
             self.api_ok = False
             self.api_error = "No readable auth token."
@@ -329,7 +401,10 @@ class ZeroTierMonitor(QObject):
         self.api.get("/status", got_status)
 
     def poll_peers(self) -> None:
-        if not self.api.ready:
+        if self._api_paused or not self.api.ready:
+            return
+        if self._svc_seen and not self.running:
+            self.peers = []
             return
 
         def got(ok: bool, data, _err: str) -> None:

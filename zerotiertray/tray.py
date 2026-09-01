@@ -77,6 +77,7 @@ class ZeroTierTray(QObject):
         monitor.networksChanged.connect(self._on_networks)
         monitor.membersChanged.connect(self._on_members)
         self.priv.result.connect(self._on_priv)
+        monitor.watch_privileged(self.priv)
 
         self.apply_settings()
         self.rebuild_menu()
@@ -577,9 +578,11 @@ class ZeroTierTray(QObject):
                 self.monitor.poll_status()
                 self.monitor.poll_peers()
                 self._notify(APP_NAME, "Access granted. The tray is live now.")
+            if pending in ("stop", "restart") and message:
+                self._notify(APP_NAME, message)
             self.monitor.poll_service()
             QTimer.singleShot(1500, self.monitor.poll_service)
-            QTimer.singleShot(1500, self.monitor.poll_status)
+            QTimer.singleShot(2500, self.monitor.poll_service)
         elif message:
             self._warn("That did not work", message)
         self.refresh()
