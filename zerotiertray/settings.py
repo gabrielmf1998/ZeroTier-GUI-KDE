@@ -528,6 +528,12 @@ class SettingsDialog(QDialog):
         self.click_action.addItem("Do nothing", "nothing")
         form.addRow("Left click", self.click_action)
 
+        self.show_addresses = QCheckBox(
+            "Show my addresses at the top of the menu")
+        self.show_addresses.setToolTip(
+            "The ZeroTier address and the public address, each one click to "
+            "copy, plus a submenu with every address this machine answers on.")
+        form.addRow("", self.show_addresses)
         self.tooltip_details = QCheckBox("Put the whole status in the tooltip")
         form.addRow("", self.tooltip_details)
         self.hide_when_stopped = QCheckBox("Hide the icon while ZeroTier is stopped")
@@ -600,19 +606,26 @@ class SettingsDialog(QDialog):
 
         node = QGroupBox("This node")
         nform = QFormLayout(node)
-        self.lbl_node = QLabel("-")
-        self.lbl_node.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        nform.addRow("Node ID", self.lbl_node)
+        self.lbl_node = self._copyable_row(nform, "Node ID")
+        self.lbl_my_ip = self._copyable_row(nform, "My ZeroTier address")
+        self.lbl_public = self._copyable_row(nform, "Public address")
+        self.lbl_public6 = self._copyable_row(nform, "Public IPv6")
+        self.lbl_lan = self._copyable_row(nform, "On this machine")
         self.lbl_version = QLabel("-")
         nform.addRow("Version", self.lbl_version)
         self.lbl_online = QLabel("-")
         nform.addRow("Reachable roots", self.lbl_online)
         self.lbl_ports = QLabel("-")
         nform.addRow("Listening on", self.lbl_ports)
-        self.lbl_surface = QLabel("-")
-        self.lbl_surface.setWordWrap(True)
-        self.lbl_surface.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        nform.addRow("Seen from outside as", self.lbl_surface)
+        copy_all = QPushButton("Copy every address")
+        copy_all.clicked.connect(self._copy_all_addresses)
+        row0 = QHBoxLayout()
+        row0.addWidget(copy_all)
+        row0.addStretch(1)
+        nform.addRow("", row0)
+        nform.addRow("", _hint(
+            "The public address is what ZeroTier's own root servers report "
+            "seeing you at, so finding it costs nothing and asks nobody."))
         lay.addWidget(node)
 
         svc = QGroupBox("The zerotier-one service")
@@ -688,6 +701,44 @@ class SettingsDialog(QDialog):
         lay.addStretch(1)
         return _scroll(page)
 
+    def _copyable_row(self, form: QFormLayout, label: str) -> QLabel:
+        """A value with its own Copy button, so an address is one click away.
+
+        The button copies the bare value stashed on the label, never the
+        annotated text beside it.
+        """
+        value = QLabel("-")
+        value.setWordWrap(True)
+        value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        button = QPushButton("Copy")
+        button.setFixedWidth(60)
+        button.clicked.connect(lambda _c=False, w=value: self._copy_value(w))
+        row = QHBoxLayout()
+        row.addWidget(value, 1)
+        row.addWidget(button)
+        form.addRow(label, row)
+        return value
+
+    @staticmethod
+    def _set_value(label: QLabel, shown: str, bare: str = "") -> None:
+        label.setText(shown)
+        label.setProperty("bare", bare)
+
+    @staticmethod
+    def _copy_value(label: QLabel) -> None:
+        from PySide6.QtWidgets import QApplication
+        text = label.property("bare") or label.text()
+        if text and text != "-":
+            QApplication.clipboard().setText(text)
+
+    def _copy_all_addresses(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        addrs = self.monitor.my_addresses()
+        lines = [f"{a}\t{label} (ZeroTier)" for a, label in addrs["zerotier"]]
+        lines += [f"{a}\tpublic" for a in addrs["public_v4"] + addrs["public_v6"]]
+        lines += [f"{ip}\t{dev}" for ip, dev in addrs["lan"]]
+        QApplication.clipboard().setText("\n".join(lines))
+
     def _privileged(self, args: list[str]) -> None:
         if not self.priv.run(args):
             self._warn("One at a time",
@@ -744,6 +795,7 @@ class SettingsDialog(QDialog):
         self.member_limit.setValue(int(cfg.get("member_limit", 24)))
 
         _set_data(self.click_action, cfg.get("click_action"))
+        self.show_addresses.setChecked(bool(cfg.get("show_addresses_in_menu", True)))
         self.tooltip_details.setChecked(bool(cfg.get("tooltip_details", True)))
         self.hide_when_stopped.setChecked(bool(cfg.get("hide_when_stopped", False)))
         self.tray_autostart.setChecked(autostart.is_enabled())
@@ -807,6 +859,7 @@ class SettingsDialog(QDialog):
             "member_limit": self.member_limit.value(),
 
             "click_action": self.click_action.currentData(),
+            "show_addresses_in_menu": self.show_addresses.isChecked(),
             "tooltip_details": self.tooltip_details.isChecked(),
             "hide_when_stopped": self.hide_when_stopped.isChecked(),
             "start_service_with_tray": self.start_service_with_tray.isChecked(),
@@ -852,13 +905,29 @@ class SettingsDialog(QDialog):
             return
         snap = self.monitor.snapshot()
 
-        self.lbl_node.setText(snap["address"] or "unknown")
+        addrs = self.monitor.my_addresses()
+        self._set_value(self.lbl_node, snap["address"] or "unknown",
+                        snap["address"])
+        self._set_value(
+            self.lbl_my_ip,
+            ", ".join(f"{a} ({label})" for a, label in addrs["zerotier"])
+            or "no network has assigned one",
+            self.monitor.my_ip())
+        self._set_value(self.lbl_public,
+                        ", ".join(addrs["public_v4"]) or "not measured yet",
+                        addrs["public_v4"][0] if addrs["public_v4"] else "")
+        self._set_value(self.lbl_public6,
+                        ", ".join(addrs["public_v6"]) or "none",
+                        addrs["public_v6"][0] if addrs["public_v6"] else "")
+        self._set_value(
+            self.lbl_lan,
+            ", ".join(f"{ip} ({dev})" for ip, dev in addrs["lan"]) or "unknown",
+            addrs["lan"][0][0] if addrs["lan"] else "")
         self.lbl_version.setText(snap["version"] or "unknown")
         self.lbl_online.setText("yes" if snap["online"] else "no root has answered")
         self.lbl_ports.setText(
             "UDP " + ", ".join(str(p) for p in snap["ports"]) +
             ("  (UPnP/NAT-PMP on)" if snap["port_mapping"] else ""))
-        self.lbl_surface.setText(", ".join(snap["surface"]) or "not measured yet")
         self.lbl_unit.setText(
             f"{self.monitor.unit}: {snap['unit_state'] or 'not found'}"
             + ("  ·  TCP relay in use" if snap["tcp_relay"] else ""))

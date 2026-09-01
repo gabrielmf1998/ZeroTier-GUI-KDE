@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -211,6 +212,8 @@ class ZeroTierMonitor(QObject):
         self._state = "stopped"
         self._member_keys: set[str] = set()
         self._neigh: dict[str, str] = {}
+        self._lan: list[tuple[str, str]] = []
+        self._fw_cache: tuple | None = None
         self._first_pass = True
 
         self._svc_timer = QTimer(self)
@@ -270,6 +273,29 @@ class ZeroTierMonitor(QObject):
             "systemctl",
             ["show", self.unit, "-p", "ActiveState", "-p", "UnitFileState", "--value"],
             got, self, 8000)
+        self.poll_lan()
+
+    def poll_lan(self) -> None:
+        """The address this machine uses to reach the internet, from the kernel.
+
+        Not a lookup and not a guess: `ip route get` reports the source address
+        the routing table would pick, which is the one ZeroTier binds on.
+        """
+        def got(_code: int, out: str, _err: str) -> None:
+            found: list[tuple[str, str]] = []
+            try:
+                entries = json.loads(out) if out else []
+            except ValueError:
+                entries = []
+            for entry in entries:
+                src = entry.get("prefsrc")
+                if src:
+                    found.append((src, entry.get("dev", "")))
+            if found != self._lan:
+                self._lan = found
+                self.changed.emit()
+
+        system.run_async("ip", ["-json", "route", "get", "1.1.1.1"], got, self, 6000)
 
     def poll_status(self) -> None:
         if not self.api.ready:
@@ -439,6 +465,44 @@ class ZeroTierMonitor(QObject):
     def member_count(self) -> int:
         return sum(1 for m in self.all_members() if m["reachable"])
 
+    # ------------------------------------------------------------ addresses
+    def my_addresses(self) -> dict:
+        """Every address this machine answers on, grouped and deduplicated.
+
+        The ZeroTier ones come from the networks, the public ones are the
+        surface addresses the roots see us at (so no third party is asked),
+        and the local one is whatever the routing table picks.
+        """
+        zerotier = []
+        for net in self.networks:
+            label = net.get("name") or net.get("nwid", "")
+            for addr in net.get("assignedAddresses") or []:
+                zerotier.append((addr, label))
+
+        settings = (self.status.get("config") or {}).get("settings") or {}
+        v4, v6 = [], []
+        for surface in settings.get("surfaceAddresses") or []:
+            host = surface.rsplit("/", 1)[0]
+            (v6 if ":" in host else v4).append(host)
+
+        return {
+            "zerotier": zerotier,
+            "public_v4": _dedupe(v4),
+            "public_v6": _dedupe(v6),
+            "lan": list(self._lan),
+        }
+
+    def my_ip(self) -> str:
+        """The ZeroTier address, bare - what "my IP" means in this tray."""
+        for net in self.networks:
+            for addr in net.get("assignedAddresses") or []:
+                return addr.split("/")[0]
+        return ""
+
+    def public_ip(self) -> str:
+        v4 = self.my_addresses()["public_v4"]
+        return v4[0] if v4 else ""
+
     # ------------------------------------------------------------- snapshot
     def snapshot(self) -> dict:
         cfg = (self.status.get("config") or {}).get("settings") or {}
@@ -505,15 +569,30 @@ class ZeroTierMonitor(QObject):
             return chosen
         return system.firewall_default_zone()
 
-    def firewall_open(self) -> bool | None:
-        """True/False if every ZeroTier port is open, None if unknown."""
-        if not system.firewalld_running():
-            return None
+    def firewall_open(self, max_age: float = 20.0) -> bool | None:
+        """True/False if every ZeroTier port is open, None if unknown.
+
+        Each answer costs a firewall-cmd per port, so it is cached: the menu is
+        rebuilt whenever anything moves, and none of that should shell out.
+        """
         zone = self.firewall_zone()
-        ports = self.snapshot()["ports"]
-        if not zone or not ports:
-            return None
-        return all(system.firewall_port_open(zone, p) for p in ports)
+        ports = tuple(self.snapshot()["ports"])
+        key = (zone, ports)
+        now = time.monotonic()
+        cached = self._fw_cache
+        if cached and cached[0] == key and now - cached[1] < max_age:
+            return cached[2]
+
+        if not system.firewalld_running() or not zone or not ports:
+            answer = None
+        else:
+            answer = all(system.firewall_port_open(zone, p) for p in ports)
+        self._fw_cache = (key, now, answer)
+        return answer
+
+    def forget_firewall(self) -> None:
+        """Drop the cache after we changed the firewall ourselves."""
+        self._fw_cache = None
 
 
 def ports_from(settings: dict) -> list[int]:
@@ -523,6 +602,15 @@ def ports_from(settings: dict) -> list[int]:
         if isinstance(val, int) and 0 < val < 65536:
             ports.append(val)
     return ports or [DEFAULT_PORT]
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen, out = set(), []
+    for v in values:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
 
 
 def _peer_version(peer: dict) -> str:

@@ -114,6 +114,7 @@ DEFAULTS: dict = {
     "resolve_member_ips": True,      # map peers to managed IPs via the ARP table
 
     # ---------------- behaviour ----------------
+    "show_addresses_in_menu": True,  # my IP at the top of the menu
     "click_action": "menu",          # menu | settings | toggle | nothing
     "confirm_leave": True,
     "confirm_stop": True,

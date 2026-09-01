@@ -35,6 +35,32 @@ Everything on screen here comes from zerotier-one's own local API on
 
 Every state has its own colour **and** its own animation.
 
+## My IP
+
+The first thing anyone opens a VPN tray for. It sits at the top of the menu,
+not buried in a submenu, and every line copies itself when clicked:
+
+```
+Node cc19675e38                (click to copy)
+IP 10.167.181.170              (click to copy)
+Public IP 45.237.111.105       (click to copy)
+My addresses ▸
+    ZeroTier
+        10.167.181.170  ·  Amigos Windows/Linux  ·  /24
+    Public
+        45.237.111.105
+        2804:1530:4dd:cf00:7088:3406:bb4d:6d07  ·  IPv6
+    This machine
+        192.168.0.155  ·  enp7s0
+    Copy every address
+```
+
+The public address is not looked up anywhere: it is the surface address
+ZeroTier's own root servers report seeing you at, which the daemon already
+publishes in `/status`. The local one is `ip route get` — the source address
+the routing table would actually pick, which is the one ZeroTier binds on.
+Same list, with a Copy button per row, on the Service tab.
+
 ## What it does
 
 Right-click gives you, per joined network:

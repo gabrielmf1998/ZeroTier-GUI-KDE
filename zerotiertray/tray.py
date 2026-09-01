@@ -58,6 +58,7 @@ class ZeroTierTray(QObject):
 
         self.phase = 0.0
         self._pending = ""
+        self._menu_fingerprint_cache: tuple | None = None
 
         self.tray = QSystemTrayIcon(parent)
         self.tray.setIcon(icons.app_icon())
@@ -166,6 +167,31 @@ class ZeroTierTray(QObject):
         self._paint()
         self.tray.setToolTip(self._tooltip(snap))
 
+        # Keep the exported menu in step with reality, not only with the last
+        # time somebody opened it: a D-Bus tray hands the panel whatever layout
+        # it was given, and a stale one says "not installed" for ever.
+        fingerprint = self._menu_fingerprint(snap)
+        if fingerprint != self._menu_fingerprint_cache and not self.menu.isVisible():
+            self._menu_fingerprint_cache = fingerprint
+            self.rebuild_menu()
+
+    def _menu_fingerprint(self, snap: dict) -> tuple:
+        addrs = self.monitor.my_addresses()
+        return (
+            snap["state"], snap["installed"], snap["running"],
+            snap["boot_enabled"], snap["address"], tuple(snap["ports"]),
+            tuple((n.get("nwid"), n.get("name"), n.get("status"),
+                   tuple(n.get("assignedAddresses") or []),
+                   n.get("portDeviceName"),
+                   n.get("allowManaged"), n.get("allowGlobal"),
+                   n.get("allowDefault"), n.get("allowDNS"))
+                  for n in snap["networks"]),
+            tuple(sorted(f"{m['key']}|{m['ip']}|{m['reachable']}"
+                         for m in self.monitor.all_members())),
+            tuple(addrs["public_v4"]), tuple(addrs["public_v6"]),
+            tuple(addrs["lan"]),
+        )
+
     def _tooltip(self, snap: dict) -> str:
         lines = [f"{APP_NAME} - {STATE_LABELS.get(snap['state'], snap['state'])}"]
         if not self.cfg.get("tooltip_details", True):
@@ -192,6 +218,9 @@ class ZeroTierTray(QObject):
         elif snap["member_count"]:
             lines.append(f"{snap['member_count']} other "
                          f"{'member' if snap['member_count'] == 1 else 'members'} reachable")
+        public = self.monitor.public_ip()
+        if public:
+            lines.append(f"Public IP: {public}")
         if snap["tcp_relay"]:
             lines.append("Falling back to TCP relay - UDP is being blocked.")
         return "\n".join(lines)
@@ -199,6 +228,7 @@ class ZeroTierTray(QObject):
     # ------------------------------------------------------------------- menu
     def rebuild_menu(self) -> None:
         snap = self.monitor.snapshot()
+        self._menu_fingerprint_cache = self._menu_fingerprint(snap)
         m = self.menu
         m.clear()
 
@@ -209,6 +239,9 @@ class ZeroTierTray(QObject):
             act = m.addAction(f"Node {snap['address']}   (click to copy)")
             act.triggered.connect(lambda _c=False, v=snap["address"]:
                                   self._copy(v, "Node ID copied."))
+
+        if self.cfg.get("show_addresses_in_menu", True):
+            self._add_addresses(m)
 
         if snap["state"] == "noauth":
             m.addSeparator()
@@ -282,6 +315,70 @@ class ZeroTierTray(QObject):
         m.addAction("Open config folder", self._open_config)
         m.addAction("About", self._about)
         m.addAction("Quit", self._quit)
+
+    def _add_addresses(self, m: QMenu) -> None:
+        """My IP, right at the top, plus everything else one hop away."""
+        addrs = self.monitor.my_addresses()
+        several = len(addrs["zerotier"]) > 1
+
+        for addr, label in addrs["zerotier"]:
+            bare = addr.split("/")[0]
+            text = f"IP {bare}" + (f"  ·  {label}" if several else "")
+            act = m.addAction(f"{text}   (click to copy)")
+            act.setToolTip("The address this network's controller assigned to "
+                           "this machine.")
+            act.triggered.connect(lambda _c=False, v=bare:
+                                  self._copy(v, f"{v} copied."))
+        if not addrs["zerotier"] and self.monitor.running:
+            none = m.addAction("No ZeroTier address yet")
+            none.setEnabled(False)
+
+        public = addrs["public_v4"][0] if addrs["public_v4"] else ""
+        if public:
+            act = m.addAction(f"Public IP {public}   (click to copy)")
+            act.setToolTip("What ZeroTier's root servers see this machine as. "
+                           "No third party was asked.")
+            act.triggered.connect(lambda _c=False, v=public:
+                                  self._copy(v, f"{v} copied."))
+
+        if any(addrs[k] for k in ("zerotier", "public_v4", "public_v6", "lan")):
+            self._add_address_submenu(m, addrs)
+
+    def _add_address_submenu(self, m: QMenu, addrs: dict) -> None:
+        sub = m.addMenu("My addresses")
+
+        def group(title: str, rows: list[tuple[str, str]]) -> None:
+            if not rows:
+                return
+            head = sub.addAction(title)
+            head.setEnabled(False)
+            for value, note in rows:
+                text = f"    {value}" + (f"  ·  {note}" if note else "")
+                act = sub.addAction(text)
+                act.triggered.connect(lambda _c=False, v=value:
+                                      self._copy(v, f"{v} copied."))
+
+        group("ZeroTier", [(a.split("/")[0],
+                            f"{label}  ·  /{a.split('/')[1]}" if "/" in a else label)
+                           for a, label in addrs["zerotier"]])
+        group("Public", [(a, "") for a in addrs["public_v4"]]
+                        + [(a, "IPv6") for a in addrs["public_v6"]])
+        group("This machine", [(ip, dev) for ip, dev in addrs["lan"]])
+
+        sub.addSeparator()
+        sub.addAction("Copy every address",
+                      lambda _c=False, a=addrs: self._copy_all_addresses(a))
+
+    def _copy_all_addresses(self, addrs: dict) -> None:
+        lines = []
+        for addr, label in addrs["zerotier"]:
+            lines.append(f"{addr}\t{label} (ZeroTier)")
+        for addr in addrs["public_v4"] + addrs["public_v6"]:
+            lines.append(f"{addr}\tpublic")
+        for ip, dev in addrs["lan"]:
+            lines.append(f"{ip}\t{dev}")
+        QApplication.clipboard().setText("\n".join(lines))
+        self._notify(APP_NAME, f"{len(lines)} addresses copied.")
 
     def _add_network_menu(self, parent: QMenu, net: dict) -> None:
         nwid = net.get("nwid", "")
@@ -470,6 +567,9 @@ class ZeroTierTray(QObject):
 
     def _on_priv(self, ok: bool, message: str) -> None:
         pending, self._pending = self._pending, ""
+        if pending == "firewall":
+            self.monitor.forget_firewall()
+            self._menu_fingerprint_cache = None
         if ok:
             if pending == "grant":
                 self.monitor.reload_token()
@@ -485,6 +585,7 @@ class ZeroTierTray(QObject):
 
     def _copy_status(self) -> None:
         snap = self.monitor.snapshot()
+        addrs = self.monitor.my_addresses()
         lines = [
             f"{APP_NAME} status",
             f"  state    : {STATE_LABELS.get(snap['state'], snap['state'])}",
@@ -493,6 +594,9 @@ class ZeroTierTray(QObject):
             f"  node     : {snap['address'] or 'unknown'}  v{snap['version']}",
             f"  online   : {'yes' if snap['online'] else 'no'}",
             f"  ports    : {', '.join(str(p) for p in snap['ports'])}",
+            f"  my IP    : {self.monitor.my_ip() or '-'}",
+            f"  public   : {', '.join(addrs['public_v4'] + addrs['public_v6']) or '-'}",
+            f"  local    : {', '.join(f'{ip} ({dev})' for ip, dev in addrs['lan']) or '-'}",
         ]
         for net in snap["networks"]:
             lines.append(f"  network  : {net.get('name') or ''} [{net.get('nwid')}]"
