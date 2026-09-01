@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""System launcher for ZeroTier Tray (packaged installs)."""
+import sys
+
+sys.path.insert(0, "/usr/share/zerotier-tray-kde")
+
+from zerotiertray.main import main
+
+sys.exit(main())

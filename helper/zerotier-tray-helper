@@ -1,0 +1,280 @@
+#!/usr/bin/python3
+"""
+zerotier-tray-helper - the privileged half of ZeroTier Tray.
+
+Runs as root through pkexec. It is deliberately small and does exactly four
+things: drive the zerotier-one unit, enable it at boot, open or close ZeroTier's
+own UDP ports in one firewalld zone, and hand a named local user a private copy
+of the service auth token. Joining and leaving are here too, as the fallback for
+when no token has been granted yet.
+
+Nothing here trusts its arguments. The user name has to resolve to a real
+unprivileged account, the zone has to be one firewalld already knows, and a
+network ID has to be sixteen hex digits. The ports opened in the firewall are
+never taken from the caller - they are read back out of the running service.
+"""
+
+from __future__ import annotations
+
+import grp
+import json
+import os
+import pwd
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+HOME = "/var/lib/zerotier-one"
+AUTHTOKEN = os.path.join(HOME, "authtoken.secret")
+PORTFILE = os.path.join(HOME, "zerotier-one.port")
+SERVICE = "zerotier-one.service"
+DEFAULT_PORT = 9993
+
+# Where the unprivileged half looks for its copy, relative to $HOME.
+TOKEN_REL = os.path.join(".config", "zerotier-tray", "authtoken.secret")
+
+HEX = set("0123456789abcdef")
+
+
+def die(msg: str, code: int = 1):
+    sys.stderr.write(msg.rstrip() + "\n")
+    sys.exit(code)
+
+
+def systemctl(*args) -> int:
+    return subprocess.run(["systemctl", *args]).returncode
+
+
+# ── validation ──────────────────────────────────────────────
+
+def target_user(name: str) -> pwd.struct_passwd:
+    """A real, unprivileged, local account - nothing else."""
+    if not name or len(name) > 32 or not all(
+            c.isalnum() or c in "._-" for c in name):
+        die("that is not a user name")
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError:
+        die(f"no such user: {name}")
+    if entry.pw_uid == 0:
+        die("root already has access")
+    if entry.pw_uid < 1000:
+        die("that is a system account")
+    if not os.path.isdir(entry.pw_dir):
+        die(f"{name} has no home directory")
+    return entry
+
+
+def valid_zone(zone: str) -> str:
+    if not zone or len(zone) > 32 or not all(
+            c.isalnum() or c in "_-" for c in zone):
+        die("that is not a zone name")
+    r = subprocess.run(["firewall-cmd", "--get-zones"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        die("firewalld is not answering")
+    if zone not in r.stdout.split():
+        die(f"firewalld has no zone called {zone}")
+    return zone
+
+
+def valid_nwid(nwid: str) -> str:
+    nwid = nwid.strip().lower()
+    if len(nwid) != 16 or not set(nwid) <= HEX:
+        die("a network ID is sixteen hexadecimal characters")
+    return nwid
+
+
+# ── the local API, as root ──────────────────────────────────
+
+def read_token() -> str:
+    try:
+        with open(AUTHTOKEN) as fh:
+            return fh.read().strip()
+    except OSError as e:
+        die(f"cannot read the service token: {e}")
+
+
+def read_port() -> int:
+    try:
+        with open(PORTFILE) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return DEFAULT_PORT
+
+
+def api(method: str, path: str, body: dict | None = None):
+    port = read_port()
+    data = json.dumps(body or {}).encode() if method == "POST" else None
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                 data=data, method=method)
+    req.add_header("X-ZT1-Auth", read_token())
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        die(f"the service refused that ({e.code})")
+    except (urllib.error.URLError, OSError) as e:
+        die(f"the service is not answering: {e}")
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def listening_ports() -> list[int]:
+    """The UDP ports zerotier-one actually holds, straight from /status."""
+    ports: list[int] = []
+    try:
+        status = api("GET", "/status") or {}
+        settings = (status.get("config") or {}).get("settings") or {}
+        for key in ("primaryPort", "secondaryPort", "tertiaryPort"):
+            value = settings.get(key)
+            if isinstance(value, int) and 0 < value < 65536:
+                ports.append(value)
+    except SystemExit:
+        ports = []
+    return ports or [read_port()]
+
+
+# ── granting a user access to the token ─────────────────────
+
+def as_user(entry: pwd.struct_passwd, fn) -> None:
+    """Run fn() in a child process that has dropped to that user.
+
+    The target path is under a home directory the user controls, so root must
+    never follow it. Becoming the user first makes the whole question go away.
+    """
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgroups(_groups_of(entry))
+            os.setgid(entry.pw_gid)
+            os.setuid(entry.pw_uid)
+            os.umask(0o077)
+            fn()
+        except Exception as e:                       # noqa: BLE001
+            sys.stderr.write(f"{e}\n")
+            os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    if os.WEXITSTATUS(status) != 0:
+        die("could not write into that user's home directory")
+
+
+def _groups_of(entry: pwd.struct_passwd) -> list[int]:
+    gids = {entry.pw_gid}
+    for group in grp.getgrall():
+        if entry.pw_name in group.gr_mem:
+            gids.add(group.gr_gid)
+    return sorted(gids)
+
+
+def grant(name: str) -> None:
+    entry = target_user(name)
+    token = read_token()
+    dest = os.path.join(entry.pw_dir, TOKEN_REL)
+
+    def write() -> None:
+        os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+        tmp = dest + ".new"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                     0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(token + "\n")
+        os.replace(tmp, dest)
+
+    as_user(entry, write)
+    print(dest)
+
+
+def revoke(name: str) -> None:
+    entry = target_user(name)
+    dest = os.path.join(entry.pw_dir, TOKEN_REL)
+
+    def remove() -> None:
+        try:
+            os.unlink(dest)
+        except FileNotFoundError:
+            pass
+
+    as_user(entry, remove)
+
+
+# ── firewall ────────────────────────────────────────────────
+
+def firewall(action: str, zone: str) -> None:
+    zone = valid_zone(zone)
+    flag = "--add-port" if action == "open" else "--remove-port"
+    failed = []
+    for port in listening_ports():
+        spec = f"{flag}={port}/udp"
+        for extra in (["--permanent"], []):
+            r = subprocess.run(["firewall-cmd", f"--zone={zone}", spec, *extra],
+                               capture_output=True, text=True)
+            # firewalld says ALREADY_ENABLED / NOT_ENABLED on a no-op; that is
+            # the state we wanted, so it is not a failure.
+            out = (r.stdout + r.stderr).strip()
+            if r.returncode != 0 and "ALREADY_ENABLED" not in out \
+                    and "NOT_ENABLED" not in out:
+                failed.append(f"{port}/udp: {out}")
+    if failed:
+        die("\n".join(failed))
+    verb = "allowed" if action == "open" else "removed"
+    print(f"{verb} UDP {', '.join(str(p) for p in listening_ports())} in {zone}")
+
+
+# ── main ────────────────────────────────────────────────────
+
+USAGE = ("usage: zerotier-tray-helper "
+         "<start|stop|restart|enable|disable|grant|revoke|firewall|join|leave>")
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        die(USAGE)
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    if cmd in ("start", "stop", "restart"):
+        return systemctl(cmd, SERVICE)
+    if cmd == "enable":
+        return systemctl("enable", "--now", SERVICE)
+    if cmd == "disable":
+        return systemctl("disable", SERVICE)
+
+    if cmd == "grant":
+        if len(args) != 1:
+            die("usage: zerotier-tray-helper grant <user>")
+        grant(args[0])
+        return 0
+    if cmd == "revoke":
+        if len(args) != 1:
+            die("usage: zerotier-tray-helper revoke <user>")
+        revoke(args[0])
+        return 0
+
+    if cmd == "firewall":
+        if len(args) != 2 or args[0] not in ("open", "close"):
+            die("usage: zerotier-tray-helper firewall <open|close> <zone>")
+        firewall(args[0], args[1])
+        return 0
+
+    if cmd == "join":
+        if len(args) != 1:
+            die("usage: zerotier-tray-helper join <network id>")
+        api("POST", f"/network/{valid_nwid(args[0])}", {})
+        return 0
+    if cmd == "leave":
+        if len(args) != 1:
+            die("usage: zerotier-tray-helper leave <network id>")
+        api("DELETE", f"/network/{valid_nwid(args[0])}")
+        return 0
+
+    die(f"unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

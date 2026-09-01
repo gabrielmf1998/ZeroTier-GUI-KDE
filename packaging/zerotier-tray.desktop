@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ZeroTier Tray
+GenericName=ZeroTier Control
+Comment=Join networks, see who is connected and drive ZeroTier from the system tray
+Exec=zerotier-tray
+Icon=zerotier-tray
+Terminal=false
+Categories=Network;Utility;
+Keywords=zerotier;vpn;network;sdn;tray;peer;lan;
+StartupNotify=false
