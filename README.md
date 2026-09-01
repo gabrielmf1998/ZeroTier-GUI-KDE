@@ -1,4 +1,4 @@
-# ZeroTier Tray
+# ZeroTier GUI Tray Icon KDE
 
 An **unofficial, non-affiliated** system tray GUI for **ZeroTier One**, built
 for KDE Plasma and working on any desktop with a system tray. Join and leave
