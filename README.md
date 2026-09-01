@@ -1,11 +1,24 @@
 # ZeroTier Tray
 
-A system tray icon for **ZeroTier One**. Join and leave networks, see the
-address the controller gave you, watch who else is reachable and how far away
-they are, flip the per-network switches, start the service, keep it across
-reboots and open its UDP ports in the firewall — without opening a terminal.
+An **unofficial, non-affiliated** system tray GUI for **ZeroTier One**, built
+for KDE Plasma and working on any desktop with a system tray. Join and leave
+networks, see the address the controller gave you, watch who else is reachable
+and how far away they are, flip the per-network switches, start the service,
+keep it across reboots and open its UDP ports in the firewall — without opening
+a terminal.
 
 ![States](docs/states.png)
+
+> **Not affiliated with ZeroTier, Inc.**
+> This is an independent third-party front end. It is not made, endorsed,
+> reviewed or supported by ZeroTier, Inc. ZeroTier is their trademark; the mark
+> is drawn here only to identify the software this tray controls. For the
+> daemon itself, and for anything that goes wrong inside it, go to
+> [zerotier.com](https://www.zerotier.com/). Bugs in **this tray** belong in
+> this repository's issues, never theirs.
+
+It drives `zerotier-one`; it does not replace it. Every package here depends on
+`zerotier-one`, and the one-line installer puts it in for you if it is missing.
 
 ## Why
 
@@ -166,42 +179,56 @@ geometry rather than text, so they never depend on an installed font.
   upstream draws it, and shows the state as a corner dot instead.
 - **ZeroTier mark** is the same glyph, tinted with the state colour.
 
+The mark is used only to identify the daemon this tray controls, the way a
+remote control is labelled with the name of the thing it points at. It does not
+imply any endorsement, and 24 of the 26 styles carry no ZeroTier branding at
+all if you would rather it did not appear on your panel.
+
 ## Install
 
-Fedora / RHEL:
-
-```sh
-sudo dnf install ./dist/zerotier-tray-kde-1.0.0-1.fc46.noarch.rpm
-```
-
-Debian / Ubuntu:
-
-```sh
-sudo apt install ./dist/zerotier-tray-kde_1.0.0-1_all.deb
-```
-
-Arch:
-
-```sh
-sudo pacman -U dist/zerotier-tray-kde-1.0.0-1-any.pkg.tar.zst
-```
-
-Any distro, from a clone:
-
-```sh
-./install.sh
-```
-
-Or straight from the latest release:
+The short way — picks the right package for your distro, installs
+`zerotier-one` first if it is missing, and starts it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gabrielmf1998/ZeroTier-Tray-KDE/main/install-online.sh | sh
 ```
 
-Needs `python3`, `PySide6` (`python3-pyside6` on Fedora) and `polkit`. The
-AppImage is thin — it uses the system Python and PySide6, and still wants the
-helper installed from a package, because `pkexec` will only run a real file that
-a polkit policy names.
+Or grab a package from [Releases](https://github.com/gabrielmf1998/ZeroTier-Tray-KDE/releases):
+
+| Distro | Package | Command |
+|---|---|---|
+| Fedora / RHEL | `.rpm` | `sudo dnf install ./zerotier-tray-kde-1.0.0-1.fc46.noarch.rpm` |
+| Debian / Ubuntu | `.deb` | `sudo apt install ./zerotier-tray-kde_1.0.0-1_all.deb` |
+| Arch / Manjaro | `.pkg.tar.zst` | `sudo pacman -U zerotier-tray-kde-1.0.0-1-any.pkg.tar.zst` |
+| anything else | `.AppImage` | `chmod +x ZeroTier-Tray-KDE-x86_64.AppImage && ./ZeroTier-Tray-KDE-x86_64.AppImage` |
+
+Or from a clone: `./install.sh`.
+
+### Where zerotier-one comes from
+
+Every package declares a hard dependency on `zerotier-one`, because a tray for
+a daemon that is not there is useless. Your package manager satisfies it from:
+
+- **Arch** — `extra/zerotier-one`, nothing to set up.
+- **Fedora** — RPM Fusion nonfree. If you do not have it, the installer falls
+  back to ZeroTier's own repository.
+- **Debian / Ubuntu** — not in the distro repositories at all, so the installer
+  uses ZeroTier's own signed installer from `install.zerotier.com`, which is
+  their documented method and adds their apt repository.
+
+The installer tells you which one it is about to use before it does it. If you
+would rather do it yourself, install `zerotier-one` first and the packages drop
+straight in.
+
+### Requirements
+
+`python3`, `PySide6` (`python3-pyside6` on Fedora), `polkit`, and `zerotier-one`.
+`firewalld`, `iproute` and `iputils` are optional — without them the firewall
+button and the member scan sit out, and everything else works.
+
+The AppImage is thin: it uses the system Python and PySide6. It also still wants
+the helper installed from a package, because `pkexec` will only run a real file
+on disk that a polkit policy names.
 
 To build every package into `dist/`:
 
@@ -214,6 +241,11 @@ To build every package into `dist/`:
 `~/.config/zerotier-tray/config.json`, written by the settings window. Delete it
 to start over.
 
+## About
+
+![About](docs/about.png)
+
 ## Licence
 
-MIT.
+MIT for this tray. ZeroTier One itself is a separate project under its own
+licence — see [zerotier.com](https://www.zerotier.com/).

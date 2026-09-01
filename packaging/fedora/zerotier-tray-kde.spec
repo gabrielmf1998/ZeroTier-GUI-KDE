@@ -3,7 +3,7 @@
 Name:           zerotier-tray-kde
 Version:        1.0.0
 Release:        1%{?dist}
-Summary:        Tray icon to run and control ZeroTier One
+Summary:        Unofficial tray icon to run and control ZeroTier One
 
 License:        MIT
 URL:            https://github.com/gabrielmf1998/ZeroTier-Tray-KDE
@@ -21,6 +21,10 @@ Recommends:     iproute
 Recommends:     iputils
 
 %description
+An unofficial, non-affiliated tray GUI for ZeroTier One. Not made, endorsed or
+supported by ZeroTier, Inc.; report bugs in the tray to its own project, never
+to them.
+
 ZeroTier Tray puts ZeroTier One in the system tray. Join and leave networks,
 copy the address the controller gave you, watch who else on the network is
 reachable and how far away they are, flip the per-network switches, start the

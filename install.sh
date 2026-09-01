@@ -14,8 +14,13 @@ command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 python3 -c "import PySide6.QtWidgets, PySide6.QtNetwork" 2>/dev/null || {
     echo "PySide6 is required:  sudo dnf install python3-pyside6" >&2; exit 1; }
 command -v pkexec >/dev/null || echo "warning: pkexec not found (polkit)" >&2
-command -v zerotier-one >/dev/null || command -v zerotier-cli >/dev/null || \
-    echo "warning: zerotier-one does not look installed" >&2
+command -v zerotier-cli >/dev/null || {
+    echo "zerotier-one is not installed, and this tray only drives it." >&2
+    echo "  Arch:          sudo pacman -S zerotier-one" >&2
+    echo "  Fedora:        sudo dnf install zerotier-one   (RPM Fusion nonfree)" >&2
+    echo "  anywhere else: curl -s https://install.zerotier.com | sudo bash" >&2
+    exit 1
+}
 
 $SUDO install -d "$PREFIX/share/$NAME/zerotiertray"
 $SUDO install -m 0644 "$ROOT"/zerotiertray/*.py "$PREFIX/share/$NAME/zerotiertray/"

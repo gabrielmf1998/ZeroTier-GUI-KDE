@@ -9,6 +9,7 @@ from pathlib import Path
 
 APP_NAME = "ZeroTier Tray"
 APP_ID = "zerotier-tray"
+PROJECT_URL = "https://github.com/gabrielmf1998/ZeroTier-Tray-KDE"
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_ID
 CONFIG_FILE = CONFIG_DIR / "config.json"

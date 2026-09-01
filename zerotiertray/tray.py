@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import icons, system, zt
-from .config import APP_NAME, CONFIG_FILE, STATES
+from . import __version__
+from .config import APP_NAME, CONFIG_FILE, PROJECT_URL, STATES
 
 STATE_LABELS = dict(STATES)
 
@@ -629,15 +630,25 @@ class ZeroTierTray(QObject):
         box = QMessageBox(QMessageBox.NoIcon, f"About {APP_NAME}", "")
         box.setWindowIcon(icons.app_icon())
         box.setTextFormat(Qt.RichText)
+        box.setIconPixmap(icons.render_pixmap(
+            72, "zerotier_logo", icons.ZT_ORANGE, "none", 0.0,
+            icons.RenderCtx(padding=0.02)))
         box.setText(
-            f"<b>{APP_NAME}</b><br><br>"
+            f"<b>{APP_NAME}</b> {__version__}<br><br>"
             "A tray icon for ZeroTier One. Join and leave networks, see the "
             "address you were given, watch who else is reachable, flip the "
             "per-network switches, start the service at boot and open its UDP "
             "port - without a terminal.<br><br>"
             "Everything comes from zerotier-one's own local API; nothing is "
             "sent anywhere.<br><br>"
-            "<a href='https://www.zerotier.com/'>zerotier.com</a>"
+            "<b>Not affiliated with ZeroTier, Inc.</b><br>"
+            "This is an independent front end, not made, endorsed or supported "
+            "by them. ZeroTier is their trademark, and the mark is drawn here "
+            "only to name the software this tray controls. Problems with the "
+            "tray belong in its own tracker, not theirs.<br><br>"
+            f"<a href='{PROJECT_URL}'>{PROJECT_URL}</a><br>"
+            "<a href='https://www.zerotier.com/'>zerotier.com</a> - the daemon "
+            "this controls"
         )
         box.exec()
 

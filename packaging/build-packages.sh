@@ -9,7 +9,7 @@ VERSION=1.0.0
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/ZeroTier-Tray-KDE"
-SUMMARY="Tray icon to run and control ZeroTier One"
+SUMMARY="Unofficial tray icon to run and control ZeroTier One"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
@@ -71,9 +71,13 @@ Maintainer: $MAINT
 Section: net
 Priority: optional
 Homepage: $URL
-Depends: python3, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, policykit-1 | polkitd, systemd
-Recommends: zerotier-one, firewalld, iproute2, iputils-ping
+Depends: python3, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, policykit-1 | polkitd, systemd, zerotier-one
+Recommends: firewalld, iproute2, iputils-ping
 Description: $SUMMARY
+ An unofficial, non-affiliated tray GUI for ZeroTier One. Not made, endorsed or
+ supported by ZeroTier, Inc.; report bugs in the tray to its own project, never
+ to them.
+ .
  ZeroTier Tray puts ZeroTier One in the system tray. Join and leave networks,
  copy the address the controller gave you, watch who else on the network is
  reachable and how far away they are, flip the per-network switches, start the
@@ -109,8 +113,9 @@ depend = python
 depend = pyside6
 depend = polkit
 depend = systemd
-optdepend = zerotier-one: the service this controls
+depend = zerotier-one
 optdepend = firewalld: open the ZeroTier ports from the tray
+optdepend = iproute2: put an address on each member
 optdepend = iputils: scan a network for members
 PKGINFO
 ( cd "$PKG"
@@ -155,6 +160,10 @@ if [ ! -x /usr/libexec/zerotier-tray-helper ]; then
     echo "ZeroTier Tray: /usr/libexec/zerotier-tray-helper is missing, so" >&2
     echo "starting the service and opening the firewall will not work." >&2
     echo "Install the .rpm/.deb/pkg, or run install.sh from the repository." >&2
+fi
+if ! command -v zerotier-one >/dev/null 2>&1 && ! command -v zerotier-cli >/dev/null 2>&1; then
+    echo "ZeroTier Tray: zerotier-one is not installed. There is nothing to" >&2
+    echo "control without it:  curl -s https://install.zerotier.com | sudo bash" >&2
 fi
 export PYTHONPATH="$HERE/usr/share/zerotier-tray-kde${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -m zerotiertray "$@"

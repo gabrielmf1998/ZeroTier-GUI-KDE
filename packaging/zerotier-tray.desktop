@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=ZeroTier Tray
-GenericName=ZeroTier Control
-Comment=Join networks, see who is connected and drive ZeroTier from the system tray
+GenericName=ZeroTier Control (unofficial)
+Comment=Unofficial tray GUI for ZeroTier One - join networks, see who is connected
 Exec=zerotier-tray
 Icon=zerotier-tray
 Terminal=false
