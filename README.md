@@ -1,4 +1,4 @@
-# ZeroTier Tray
+# ZeroTier GUI Tray Icon KDE
 
 An **unofficial, non-affiliated** system tray GUI for **ZeroTier One**, built
 for KDE Plasma and working on any desktop with a system tray. Join and leave
@@ -48,32 +48,6 @@ Everything on screen here comes from zerotier-one's own local API on
 
 Every state has its own colour **and** its own animation.
 
-## My IP
-
-The first thing anyone opens a VPN tray for. It sits at the top of the menu,
-not buried in a submenu, and every line copies itself when clicked:
-
-```
-Node cc19675e38                (click to copy)
-IP 10.167.181.170              (click to copy)
-Public IP 45.237.111.105       (click to copy)
-My addresses ▸
-    ZeroTier
-        10.167.181.170  ·  Amigos Windows/Linux  ·  /24
-    Public
-        45.237.111.105
-        2804:1530:4dd:cf00:7088:3406:bb4d:6d07  ·  IPv6
-    This machine
-        192.168.0.155  ·  enp7s0
-    Copy every address
-```
-
-The public address is not looked up anywhere: it is the surface address
-ZeroTier's own root servers report seeing you at, which the daemon already
-publishes in `/status`. The local one is `ip route get` — the source address
-the routing table would actually pick, which is the one ZeroTier binds on.
-Same list, with a Copy button per row, on the Service tab.
-
 ## What it does
 
 Right-click gives you, per joined network:
@@ -89,7 +63,6 @@ Right-click gives you, per joined network:
 and, for the service itself: start, stop, restart, start with the system, and a
 checkbox that allows ZeroTier's UDP ports in a firewalld zone.
 
-![Networks tab](docs/tab-networks.png)
 
 ## Who else is connected
 
@@ -113,8 +86,6 @@ A member only lands in the neighbour table after it has actually exchanged a
 packet with this machine. **Scan the subnet for members** pings the /24 you were
 assigned so they all appear at once; it touches nothing but your own virtual
 network.
-
-![Members tab](docs/tab-members.png)
 
 ZeroTier's own roots and the network controller are hidden by default — they are
 infrastructure, not people. There is a checkbox to show them.
@@ -147,8 +118,6 @@ firewalld already knows, a network ID must be sixteen hex digits. The ports it
 opens are never taken from the caller — it reads them back out of the running
 service. When it writes into your home directory it drops to your uid first, so
 root never follows a path you control.
-
-![Service tab](docs/tab-service.png)
 
 ## Stopping the service
 
