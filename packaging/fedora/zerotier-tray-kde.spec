@@ -1,7 +1,7 @@
 %global bin zerotier-tray
 
 Name:           zerotier-tray-kde
-Version:        1.0.1
+Version:        1.0.2
 Release:        1%{?dist}
 Summary:        Unofficial tray icon to run and control ZeroTier One
 
@@ -73,6 +73,10 @@ install -Dm 0644 README.md %{buildroot}%{_datadir}/doc/%{name}/README.md
 %{_datadir}/icons/hicolor/*/apps/%{bin}.*
 
 %changelog
+* Tue Sep 01 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.2-1
+- Do not refuse to start when no system tray is up yet; wait for one
+- Manual check for updates against the project's releases
+
 * Tue Sep 01 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.1-1
 - Stopping the service no longer leaves the unit in failed when the daemon
   crashes on the way down; restart always brings it back

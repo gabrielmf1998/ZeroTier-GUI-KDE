@@ -7,7 +7,7 @@ import sys
 
 from PySide6.QtCore import QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 from . import icons
 from .config import APP_ID, APP_NAME, Config
@@ -41,17 +41,18 @@ def main(argv: list[str] | None = None) -> int:
     guard = QLocalServer()
     guard.listen(APP_ID)
 
-    if not QSystemTrayIcon.isSystemTrayAvailable():
-        QMessageBox.critical(None, APP_NAME,
-                             "This desktop has no system tray, so there is nowhere "
-                             "to put the icon.")
-        return 1
-
     cfg = Config()
     monitor = ZeroTierMonitor(cfg)
     tray = ZeroTierTray(cfg, monitor)
     tray.show()
     monitor.start()
+
+    # Not having a tray *yet* is normal: a panel registers its
+    # StatusNotifierWatcher on the session bus some time after login, and an
+    # app started from autostart routinely wins that race. Refusing to run is
+    # the wrong answer - wait for it instead, and stay useful meanwhile.
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        tray.wait_for_tray()
 
     if cfg.get("start_service_with_tray", False) and not monitor.running:
         QTimer.singleShot(800, tray.start_service)

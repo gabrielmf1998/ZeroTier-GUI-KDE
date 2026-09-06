@@ -32,7 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import autostart, icons, system, zt
+from . import autostart, icons, system, updates, zt
+from . import __version__
 from .config import APP_NAME, COLOR_PRESETS, STATES
 
 PREVIEW_PX = 40
@@ -108,11 +109,12 @@ def _hint(text: str) -> QLabel:
 class SettingsDialog(QDialog):
     applied = Signal()
 
-    def __init__(self, cfg, monitor, priv, parent=None) -> None:
+    def __init__(self, cfg, monitor, priv, checker, parent=None) -> None:
         super().__init__(parent)
         self.cfg = cfg
         self.monitor = monitor
         self.priv = priv
+        self.updates = checker
         self.setWindowTitle(f"{APP_NAME} settings")
         self.setWindowIcon(icons.app_icon())
         self.resize(800, 640)
@@ -674,6 +676,32 @@ class SettingsDialog(QDialog):
             "this machine to any ZeroTier network."))
         lay.addWidget(access)
 
+        upd = QGroupBox("Updates")
+        uform = QFormLayout(upd)
+        uform.addRow("This tray", QLabel(f"version {__version__}"))
+        self.lbl_update = QLabel("Not checked.")
+        self.lbl_update.setWordWrap(True)
+        uform.addRow("Latest release", self.lbl_update)
+        urow = QHBoxLayout()
+        self.btn_check_update = QPushButton("Check for updates")
+        self.btn_check_update.clicked.connect(self._check_updates)
+        urow.addWidget(self.btn_check_update)
+        self.btn_copy_install = QPushButton("Copy the install command")
+        self.btn_copy_install.clicked.connect(
+            lambda: self._copy_text_value(updates.INSTALL_COMMAND))
+        urow.addWidget(self.btn_copy_install)
+        urow.addStretch(1)
+        uform.addRow("", urow)
+        uform.addRow("", _hint(
+            "Only when you press the button. Nothing checks on a timer, at "
+            "startup or in the background, so in normal use this program makes "
+            "no outbound request at all. The check is one unauthenticated GET "
+            "to the project's releases endpoint; nothing about your node, your "
+            "networks or your peers goes with it. Updating itself is your "
+            "package manager's job — this only tells you and hands you the "
+            "command."))
+        lay.addWidget(upd)
+
         fw = QGroupBox("Firewall")
         fform = QFormLayout(fw)
         self.fw_zone = QComboBox()
@@ -738,6 +766,26 @@ class SettingsDialog(QDialog):
         lines += [f"{a}\tpublic" for a in addrs["public_v4"] + addrs["public_v6"]]
         lines += [f"{ip}\t{dev}" for ip, dev in addrs["lan"]]
         QApplication.clipboard().setText("\n".join(lines))
+
+    def _check_updates(self) -> None:
+        def answered(ok: bool, message: str) -> None:
+            self.updates.checked.disconnect(answered)
+            self.btn_check_update.setEnabled(True)
+            self.btn_check_update.setText("Check for updates")
+            self.lbl_update.setText(message)
+            self.lbl_update.setStyleSheet(
+                "font-weight: bold;" if ok and self.updates.available else "")
+
+        if not self.updates.check():
+            return
+        self.updates.checked.connect(answered)
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("Checking...")
+
+    @staticmethod
+    def _copy_text_value(text: str) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(text)
 
     def _privileged(self, args: list[str]) -> None:
         if not self.priv.run(args):

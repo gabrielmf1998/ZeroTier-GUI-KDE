@@ -30,7 +30,9 @@ the link is up, and no way to notice from the corner of your eye that it went
 down.
 
 Everything on screen here comes from zerotier-one's own local API on
-`127.0.0.1`. Nothing is invented and nothing is sent anywhere.
+`127.0.0.1`. Nothing is invented, and in normal use nothing leaves the machine:
+the single outbound request this program can make is the update check, and only
+when you press the button.
 
 ## What it shows
 
@@ -119,6 +121,29 @@ opens are never taken from the caller — it reads them back out of the running
 service. When it writes into your home directory it drops to your uid first, so
 root never follows a path you control.
 
+## Updates
+
+**Check for updates** in the menu, or the button on the Service tab, asks this
+project's releases endpoint whether a newer version is out.
+
+It happens **only when you ask**. There is no timer, no check at startup and no
+background poll — so if you never press it, this program makes no outbound
+request at all, ever. The request itself is one unauthenticated `GET` to a
+public URL; nothing about your node, your networks or your peers goes with it.
+
+It does not install anything. The packages come from dnf, pacman or apt, so all
+it can do is tell you a version is out and hand you the command that fetches
+it — the same one-liner as a fresh install, which upgrades in place.
+
+## No system tray?
+
+The icon appears when a panel offers a tray, and panels publish theirs on the
+session bus some time after login. Starting first is normal, and used to be
+fatal: the tray refused to run and told you the desktop had no tray, on desktops
+that plainly did. It now waits, and the icon turns up on its own the moment a
+tray does. If none ever arrives it says so, explains what provides one, and
+offers to open its window instead — but it does not quit on you.
+
 ## Stopping the service
 
 **Stop** used to leave the unit sitting in `failed`. `zerotier-one` sometimes
@@ -195,9 +220,9 @@ Or grab a package from [Releases](https://github.com/gabrielmf1998/ZeroTier-GUI-
 
 | Distro | Package | Command |
 |---|---|---|
-| Fedora / RHEL | `.rpm` | `sudo dnf install ./zerotier-tray-kde-1.0.1-1.fc46.noarch.rpm` |
-| Debian / Ubuntu | `.deb` | `sudo apt install ./zerotier-tray-kde_1.0.1-1_all.deb` |
-| Arch / Manjaro | `.pkg.tar.zst` | `sudo pacman -U zerotier-tray-kde-1.0.1-1-any.pkg.tar.zst` |
+| Fedora / RHEL | `.rpm` | `sudo dnf install ./zerotier-tray-kde-1.0.2-1.fc46.noarch.rpm` |
+| Debian / Ubuntu | `.deb` | `sudo apt install ./zerotier-tray-kde_1.0.2-1_all.deb` |
+| Arch / Manjaro | `.pkg.tar.zst` | `sudo pacman -U zerotier-tray-kde-1.0.2-1-any.pkg.tar.zst` |
 | anything else | `.AppImage` | `chmod +x ZeroTier-Tray-KDE-x86_64.AppImage && ./ZeroTier-Tray-KDE-x86_64.AppImage` |
 
 Or from a clone: `./install.sh`.

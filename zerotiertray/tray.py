@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from . import icons, system, zt
+from . import icons, system, updates, zt
 from . import __version__
 from .config import APP_NAME, CONFIG_FILE, PROJECT_URL, STATES
 
@@ -55,6 +55,7 @@ class ZeroTierTray(QObject):
         self.cfg = cfg
         self.monitor = monitor
         self.priv = system.Privileged(self)
+        self.updates = updates.UpdateChecker(self)
         self.settings_dialog = None
 
         self.phase = 0.0
@@ -86,6 +87,67 @@ class ZeroTierTray(QObject):
     # ------------------------------------------------------------------ setup
     def show(self) -> None:
         self.tray.show()
+
+    # --------------------------------------------------- waiting for a panel
+    def wait_for_tray(self) -> None:
+        """Keep trying until somewhere to put the icon turns up.
+
+        Qt answers isSystemTrayAvailable() from whatever is on the session bus
+        at that instant, so an app that starts before the panel gets told there
+        is no tray - on a desktop that certainly has one. Poll, say nothing for
+        the first few seconds, and only explain if it really is not coming.
+        """
+        self._tray_wait_elapsed = 0
+        self._tray_notice = None
+        # With no tray, closing the last window has to be able to end the
+        # program, or it would sit there invisible and unkillable.
+        QApplication.instance().setQuitOnLastWindowClosed(True)
+        self._tray_timer = QTimer(self)
+        self._tray_timer.timeout.connect(self._poll_for_tray)
+        self._tray_timer.start(1000)
+
+    def _poll_for_tray(self) -> None:
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray_timer.stop()
+            QApplication.instance().setQuitOnLastWindowClosed(False)
+            self.tray.show()
+            self.refresh()
+            if self._tray_notice is not None:
+                self._tray_notice.done(0)
+                self._tray_notice = None
+            return
+
+        self._tray_wait_elapsed += 1
+        if self._tray_wait_elapsed == 15:
+            self._explain_no_tray()
+        elif self._tray_wait_elapsed == 60:
+            self._tray_timer.setInterval(5000)   # settle into a slow watch
+
+    def _explain_no_tray(self) -> None:
+        box = QMessageBox(QMessageBox.Information, APP_NAME, "")
+        box.setWindowIcon(icons.app_icon())
+        box.setTextFormat(Qt.RichText)
+        box.setText(
+            "<b>Nothing is offering a system tray yet.</b><br><br>"
+            "A panel publishes one on the session bus when it starts, and this "
+            "can simply be running ahead of it - at login that is routine. "
+            "The icon will appear on its own the moment a tray shows up; "
+            "nothing needs restarting.<br><br>"
+            "If it never does, something has to provide one:<br>"
+            "• KDE Plasma, Xfce, LXQt, Cinnamon and MATE all do<br>"
+            "• GNOME needs the <i>AppIndicator and KStatusNotifierItem "
+            "Support</i> extension<br>"
+            "• Sway, Hyprland and i3 need a bar with a tray module, such as "
+            "waybar; on X11, <tt>stalonetray</tt> or <tt>trayer</tt> also work"
+        )
+        open_window = box.addButton("Open the window instead",
+                                    QMessageBox.AcceptRole)
+        box.addButton("Wait in the background", QMessageBox.RejectRole)
+        self._tray_notice = box
+        box.exec()
+        self._tray_notice = None
+        if box.clickedButton() is open_window:
+            self.open_settings()
 
     def apply_settings(self) -> None:
         fps = max(1, min(60, int(self.cfg.get("animation_fps", 20))))
@@ -234,6 +296,12 @@ class ZeroTierTray(QObject):
         m = self.menu
         m.clear()
 
+        if self.updates.available:
+            act = m.addAction(f"Update available: {self.updates.latest}")
+            act.setToolTip("A newer release of this tray is out.")
+            act.triggered.connect(self._offer_update)
+            m.addSeparator()
+
         header = m.addAction(f"{APP_NAME} - {STATE_LABELS.get(snap['state'], snap['state'])}")
         header.setEnabled(False)
 
@@ -315,6 +383,7 @@ class ZeroTierTray(QObject):
         m.addSeparator()
         m.addAction("Copy status", self._copy_status)
         m.addAction("Open config folder", self._open_config)
+        m.addAction("Check for updates", self._check_updates)
         m.addAction("About", self._about)
         m.addAction("Quit", self._quit)
 
@@ -587,6 +656,48 @@ class ZeroTierTray(QObject):
             self._warn("That did not work", message)
         self.refresh()
 
+    # ---------------------------------------------------------------- updates
+    def _check_updates(self) -> None:
+        """The menu entry. Nothing checks on its own; this is the only path."""
+        def answered(ok: bool, message: str) -> None:
+            self.updates.checked.disconnect(answered)
+            self._menu_fingerprint_cache = None    # let the banner in or out
+            if not ok:
+                self._warn("Could not check for updates", message)
+            elif self.updates.available:
+                self._offer_update()
+            else:
+                self._notify(APP_NAME, message)
+
+        if not self.updates.check():
+            return
+        self.updates.checked.connect(answered)
+
+    def _offer_update(self) -> None:
+        version = self.updates.latest
+        box = QMessageBox(QMessageBox.NoIcon, f"{APP_NAME} - update", "")
+        box.setWindowIcon(icons.app_icon())
+        box.setTextFormat(Qt.RichText)
+        box.setIconPixmap(icons.render_pixmap(
+            64, "zerotier_logo", icons.ZT_ORANGE, "none", 0.0,
+            icons.RenderCtx(padding=0.02)))
+        box.setText(
+            f"<b>ZeroTier Tray {version} is out.</b><br>"
+            f"You are running {__version__}.<br><br>"
+            "This came from your package manager, so it updates the same way. "
+            "The one-line installer picks the right package for this distro:"
+            f"<br><br><tt>{updates.INSTALL_COMMAND}</tt>")
+        copy_it = box.addButton("Copy that command", QMessageBox.ActionRole)
+        page = box.addButton("Open the release page", QMessageBox.AcceptRole)
+        box.addButton("Close", QMessageBox.RejectRole)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is copy_it:
+            self._copy(updates.INSTALL_COMMAND, "Install command copied.")
+        elif clicked is page:
+            QDesktopServices.openUrl(QUrl(self.updates.page))
+
     def _copy_status(self) -> None:
         snap = self.monitor.snapshot()
         addrs = self.monitor.my_addresses()
@@ -618,7 +729,8 @@ class ZeroTierTray(QObject):
     def open_settings(self) -> None:
         from .settings import SettingsDialog
         if self.settings_dialog is None:
-            self.settings_dialog = SettingsDialog(self.cfg, self.monitor, self.priv)
+            self.settings_dialog = SettingsDialog(self.cfg, self.monitor,
+                                                 self.priv, self.updates)
             self.settings_dialog.applied.connect(self._on_settings_applied)
         self.settings_dialog.load_from_config()
         self.settings_dialog.show()
