@@ -5,7 +5,7 @@ set -euo pipefail
 
 NAME=zerotier-tray-kde
 BIN=zerotier-tray
-VERSION=1.0.2
+VERSION=1.0.3
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/ZeroTier-GUI-KDE"

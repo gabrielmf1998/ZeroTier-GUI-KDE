@@ -1,7 +1,7 @@
 %global bin zerotier-tray
 
 Name:           zerotier-tray-kde
-Version:        1.0.2
+Version:        1.0.3
 Release:        1%{?dist}
 Summary:        Unofficial tray icon to run and control ZeroTier One
 
@@ -73,6 +73,10 @@ install -Dm 0644 README.md %{buildroot}%{_datadir}/doc/%{name}/README.md
 %{_datadir}/icons/hicolor/*/apps/%{bin}.*
 
 %changelog
+* Tue Sep 01 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.3-1
+- Pick the icon and the animation by looking at them: live galleries of all 26
+  shapes and all 21 animations, and every state drawn at once above the tabs
+
 * Tue Sep 01 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.2-1
 - Do not refuse to start when no system tray is up yet; wait for one
 - Manual check for updates against the project's releases

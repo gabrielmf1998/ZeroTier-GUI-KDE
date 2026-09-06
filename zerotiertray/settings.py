@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import getpass
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -91,6 +93,103 @@ class StatePreview(QLabel):
                                            self.animation, phase, self.ctx))
 
 
+TILE_PX = 40
+TILE_W = 92
+
+
+class GalleryTile(QToolButton):
+    """One clickable, live-rendered option in a gallery.
+
+    Fixed width so the grid stays square whatever the label says, and the full
+    name goes in the tooltip when it has to be elided.
+    """
+
+    def __init__(self, key: str, label: str, parent=None) -> None:
+        super().__init__(parent)
+        self.key = key
+        self.full_label = label
+        self.setCheckable(True)
+        self.setAutoRaise(True)
+        self.setToolTip(label)
+        self.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.setIconSize(QSize(TILE_PX, TILE_PX))
+        self.setFixedWidth(TILE_W)
+        font = self.font()
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+        self.setFont(font)
+        self.setText(QFontMetrics(font).elidedText(label, Qt.ElideRight, TILE_W - 8))
+
+
+class Gallery(QWidget):
+    """A grid of options you pick by looking at them rather than by name."""
+
+    picked = Signal(str)
+
+    def __init__(self, entries, columns: int, parent=None) -> None:
+        super().__init__(parent)
+        self.tiles: dict[str, GalleryTile] = {}
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        grid = QGridLayout(self)
+        grid.setSpacing(2)
+        grid.setContentsMargins(0, 0, 0, 0)
+        for i, (key, label) in enumerate(entries):
+            tile = GalleryTile(key, label)
+            tile.clicked.connect(lambda _c=False, k=key: self.picked.emit(k))
+            self._group.addButton(tile)
+            self.tiles[key] = tile
+            grid.addWidget(tile, i // columns, i % columns)
+
+    def current(self) -> str:
+        for key, tile in self.tiles.items():
+            if tile.isChecked():
+                return key
+        return next(iter(self.tiles), "")
+
+    def set_current(self, key: str | None) -> None:
+        """None leaves nothing checked.
+
+        An exclusive QButtonGroup refuses to let its last checked button go, so
+        clearing has to happen with exclusivity off - otherwise a gallery whose
+        options disagree would sit there claiming they all match the first one.
+        """
+        self._group.setExclusive(False)
+        for candidate, tile in self.tiles.items():
+            tile.setChecked(candidate == key)
+        self._group.setExclusive(True)
+
+    def repaint_tiles(self, render) -> None:
+        """render(key) -> QPixmap, called for every tile."""
+        for key, tile in self.tiles.items():
+            tile.setIcon(QIcon(render(key)))
+
+
+class StateStrip(QWidget):
+    """Every state at once, drawn exactly the way the tray draws it."""
+
+    def __init__(self, dialog, parent=None) -> None:
+        super().__init__(parent)
+        self.dialog = dialog
+        self.phase = 0.0
+        self.setMinimumHeight(78)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        size = 44
+        step = self.width() / max(1, len(STATES))
+        metrics = QFontMetrics(self.font())
+        for i, (key, label) in enumerate(STATES):
+            pixmap = self.dialog.render_state(key, size, self.phase)
+            painter.drawPixmap(int(step * i + step / 2 - size / 2), 4, pixmap)
+            painter.setPen(QColor(140, 140, 140))
+            painter.drawText(
+                QRectF(step * i, size + 8, step, 20),
+                Qt.AlignHCenter | Qt.AlignTop,
+                metrics.elidedText(label, Qt.ElideRight, int(step) - 4))
+        painter.end()
+
+
 def _scroll(inner: QWidget) -> QScrollArea:
     area = QScrollArea()
     area.setWidgetResizable(True)
@@ -117,14 +216,15 @@ class SettingsDialog(QDialog):
         self.updates = checker
         self.setWindowTitle(f"{APP_NAME} settings")
         self.setWindowIcon(icons.app_icon())
-        self.resize(800, 640)
+        self.resize(880, 720)
 
         self._phase = 0.0
         self._previews: dict[str, StatePreview] = {}
         self._color_buttons: dict[str, ColorButton] = {}
         self._anim_combos: dict[str, QComboBox] = {}
 
-        tabs = QTabWidget(self)
+        self.strip = StateStrip(self)
+        self.tabs = tabs = QTabWidget(self)
         tabs.addTab(self._build_appearance(), "Appearance")
         tabs.addTab(self._build_states(), "States")
         tabs.addTab(self._build_networks(), "Networks")
@@ -142,6 +242,7 @@ class SettingsDialog(QDialog):
         buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._restore)
 
         root = QVBoxLayout(self)
+        root.addWidget(self.strip)
         root.addWidget(tabs)
         root.addWidget(buttons)
 
@@ -161,13 +262,29 @@ class SettingsDialog(QDialog):
         page = QWidget()
         lay = QVBoxLayout(page)
 
+        picker = QGroupBox("Icon")
+        pick_lay = QVBoxLayout(picker)
+        self.style_gallery = Gallery(icons.ICON_STYLES, columns=7)
+        self.style_gallery.picked.connect(lambda _k: self._sync_previews())
+        pick_lay.addWidget(self.style_gallery)
+        pick_lay.addWidget(_hint(
+            "Every shape, drawn by the same painter the tray uses, at the "
+            "colour of the Connected state. Click one."))
+        lay.addWidget(picker)
+
+        motion = QGroupBox("Motion")
+        motion_lay = QVBoxLayout(motion)
+        self.anim_gallery = Gallery(icons.ANIMATIONS, columns=7)
+        self.anim_gallery.picked.connect(self._pick_animation_for_all)
+        motion_lay.addWidget(self.anim_gallery)
+        motion_lay.addWidget(_hint(
+            "These are moving right now, in the shape you picked. Clicking one "
+            "gives it to <b>every</b> state — the States tab sets them one by "
+            "one, which is where a different animation per state is worth it."))
+        lay.addWidget(motion)
+
         shape = QGroupBox("Shape")
         form = QFormLayout(shape)
-        self.style_combo = QComboBox()
-        for key, label in icons.ICON_STYLES:
-            self.style_combo.addItem(label, key)
-        self.style_combo.currentIndexChanged.connect(self._sync_previews)
-        form.addRow("Icon style", self.style_combo)
 
         self.thickness = QDoubleSpinBox()
         self.thickness.setRange(0.4, 2.5)
@@ -814,7 +931,7 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------ load/save
     def load_from_config(self) -> None:
         cfg = self.cfg
-        _set_data(self.style_combo, cfg.get("icon_style"))
+        self.style_gallery.set_current(str(cfg.get("icon_style")))
         self.thickness.setValue(float(cfg.get("icon_thickness", 1.0)))
         self.padding.setValue(float(cfg.get("icon_padding", 0.04)))
         self.scale.setValue(float(cfg.get("icon_scale", 1.12)))
@@ -837,6 +954,7 @@ class SettingsDialog(QDialog):
         for key, _ in STATES:
             self._color_buttons[key].set_color(cfg.color_for(key))
             _set_data(self._anim_combos[key], cfg.animation_for(key))
+        self._sync_anim_gallery()
 
         self.show_roots.setChecked(bool(cfg.get("show_roots", False)))
         self.resolve_ips.setChecked(bool(cfg.get("resolve_member_ips", True)))
@@ -881,7 +999,7 @@ class SettingsDialog(QDialog):
         colors = {k: b.color() for k, b in self._color_buttons.items()}
         anims = {k: c.currentData() for k, c in self._anim_combos.items()}
         return {
-            "icon_style": self.style_combo.currentData(),
+            "icon_style": self.style_gallery.current(),
             "icon_thickness": self.thickness.value(),
             "icon_padding": self.padding.value(),
             "icon_scale": self.scale.value(),
@@ -1071,8 +1189,20 @@ class SettingsDialog(QDialog):
                 table.setItem(row, col, _cell(value))
 
     # -------------------------------------------------------------- previews
+    def _sync_anim_gallery(self) -> None:
+        """Tick a motion tile only when every state agrees on it.
+
+        States are free to differ, and usually do, so "none of them" is a real
+        answer here - showing one ticked would claim a uniformity that is not
+        there.
+        """
+        chosen = {c.currentData() for c in self._anim_combos.values()}
+        self.anim_gallery.set_current(chosen.pop() if len(chosen) == 1 else None)
+
     def _sync_previews(self) -> None:
-        style = self.style_combo.currentData() or "zerotier"
+        self._sync_anim_gallery()
+        self._repaint_galleries()
+        style = self.style_gallery.current() or "zerotier"
         mono = self.monochrome.isChecked()
         ctx = icons.RenderCtx(
             members=3,
@@ -1097,6 +1227,58 @@ class SettingsDialog(QDialog):
                 dot = prev.color
             prev.ctx = icons.RenderCtx(**{**ctx.__dict__, "state_dot": dot})
 
+    # ------------------------------------------------------- live galleries
+    def _base_ctx(self) -> icons.RenderCtx:
+        """The geometry every preview shares, so they are all comparable."""
+        return icons.RenderCtx(
+            members=3,
+            networks=1,
+            thickness=self.thickness.value(),
+            padding=self.padding.value(),
+            scale=self.scale.value(),
+        )
+
+    def _preview_color(self, state: str) -> str:
+        if self.monochrome.isChecked():
+            return self.mono_color.color()
+        button = self._color_buttons.get(state)
+        return button.color() if button else icons.ZT_ORANGE
+
+    def render_state(self, state: str, size: int, phase: float):
+        """One state, exactly as the tray would paint it. Used by the strip."""
+        style = self.style_gallery.current() or "zerotier"
+        color = self._preview_color(state)
+        ctx = self._base_ctx()
+        ctx.badge = self.show_badge.isChecked()
+        ctx.badge_text = "3"
+        ctx.badge_style = self.badge_style.currentData() or "circle"
+        ctx.badge_position = self.badge_position.currentData() or "br"
+        ctx.badge_color = self.badge_color.color()
+        ctx.badge_text_color = self.badge_text_color.color()
+        if style in icons.FIXED_BRAND_STYLES and self.state_dot.isChecked():
+            ctx.state_dot = color
+        combo = self._anim_combos.get(state)
+        animation = (combo.currentData() if combo else "none") or "none"
+        return icons.render_pixmap(size, style, color, animation, phase, ctx)
+
+    def _repaint_galleries(self) -> None:
+        """Shapes stand still so they compare; motion moves, because that is
+        the whole point of looking at it."""
+        connected = self._preview_color("connected")
+        ctx = self._base_ctx()
+        style = self.style_gallery.current() or "zerotier"
+
+        self.style_gallery.repaint_tiles(
+            lambda key: icons.render_pixmap(TILE_PX, key, connected, "none", 0.0, ctx))
+        self.anim_gallery.repaint_tiles(
+            lambda key: icons.render_pixmap(TILE_PX, style, connected, key,
+                                            self._phase, ctx))
+
+    def _pick_animation_for_all(self, key: str) -> None:
+        for combo in self._anim_combos.values():
+            _set_data(combo, key)
+        self._sync_previews()
+
     def _animate(self) -> None:
         if not self.isVisible():
             return
@@ -1104,6 +1286,10 @@ class SettingsDialog(QDialog):
         self._phase = (self._phase + speed / 40.0) % 1.0
         for prev in self._previews.values():
             prev.paint(self._phase)
+        self.strip.phase = self._phase
+        self.strip.update()
+        if self.tabs.currentIndex() == 0:      # only the Appearance tab is looking
+            self._repaint_galleries()
 
     def _warn(self, title: str, text: str) -> None:
         box = QMessageBox(QMessageBox.Warning, title, text or "Unknown error.", parent=self)

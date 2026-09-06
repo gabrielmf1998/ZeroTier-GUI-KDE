@@ -189,7 +189,20 @@ nothing: the traffic arrives on the physical link.
 ## Icons
 
 26 styles, 21 animations, a colour and an animation per state, and an optional
-count badge.
+count badge — and you choose them by **looking**, not by reading a dropdown.
+
+The Appearance tab is two live galleries. Every shape is drawn by the same
+painter the tray uses, in the colour of the Connected state, so they are
+directly comparable. Every animation is *moving*, in the shape you picked,
+because that is the only way to tell "breathe" from "pulse" without trying
+both. Clicking a motion gives it to every state; the States tab is where you
+set them one at a time.
+
+Above the tabs, all nine states are drawn at once, exactly as the tray will
+draw them — so a colour change shows up everywhere it matters before you
+commit to it.
+
+![Appearance tab](docs/tab-appearance.png)
 
 ![Icon styles](docs/icon-styles.png)
 
@@ -220,9 +233,9 @@ Or grab a package from [Releases](https://github.com/gabrielmf1998/ZeroTier-GUI-
 
 | Distro | Package | Command |
 |---|---|---|
-| Fedora / RHEL | `.rpm` | `sudo dnf install ./zerotier-tray-kde-1.0.2-1.fc46.noarch.rpm` |
-| Debian / Ubuntu | `.deb` | `sudo apt install ./zerotier-tray-kde_1.0.2-1_all.deb` |
-| Arch / Manjaro | `.pkg.tar.zst` | `sudo pacman -U zerotier-tray-kde-1.0.2-1-any.pkg.tar.zst` |
+| Fedora / RHEL | `.rpm` | `sudo dnf install ./zerotier-tray-kde-1.0.3-1.fc46.noarch.rpm` |
+| Debian / Ubuntu | `.deb` | `sudo apt install ./zerotier-tray-kde_1.0.3-1_all.deb` |
+| Arch / Manjaro | `.pkg.tar.zst` | `sudo pacman -U zerotier-tray-kde-1.0.3-1-any.pkg.tar.zst` |
 | anything else | `.AppImage` | `chmod +x ZeroTier-Tray-KDE-x86_64.AppImage && ./ZeroTier-Tray-KDE-x86_64.AppImage` |
 
 Or from a clone: `./install.sh`.
