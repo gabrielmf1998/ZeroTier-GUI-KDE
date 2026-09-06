@@ -62,7 +62,7 @@ pick them by looking, not by reading a dropdown. Every shape is drawn by the
 same painter the tray uses; every animation is actually moving. All nine states
 sit above the tabs, exactly as the tray will draw them.
 
-![Appearance](docs/tab-appearance.png)
+![Appearance](docs/appearance.png)
 
 Two of the styles are ZeroTier's own mark. Upstream says it plainly in
 `artwork/logo.html` — *"Yes, our logo is a Unicode character."* — U+23C1 ⏁ on
