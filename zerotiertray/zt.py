@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -105,6 +106,57 @@ def find_port(home_dir: Path, override: int = 0) -> int:
         return DEFAULT_PORT
 
 
+def local_settings(home_dir: Path) -> dict:
+    """The "settings" block of local.conf, or {} when there is none to read."""
+    try:
+        data = json.loads((home_dir / "local.conf").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    settings = data.get("settings") if isinstance(data, dict) else None
+    return settings if isinstance(settings, dict) else {}
+
+
+def _valid_port(value) -> bool:
+    return isinstance(value, int) and 0 < value < 65536
+
+
+def stable_ports(primary: int, local: dict) -> list[int]:
+    """The UDP ports worth opening in a firewall: the ones that survive a restart.
+
+    zerotier-one draws its secondary and tertiary ports at random every time it
+    starts (OneService.cpp: "Secondary ports are now randomized on startup"),
+    unless local.conf pins them. Opening one of those permanently only leaves a
+    dead hole behind after the next restart, and a new one gets opened beside
+    it. The primary port is the one that matters for inbound, and the one
+    ZeroTier's own docs say to open. The helper applies the same rule.
+    """
+    ports = [primary if _valid_port(primary) else DEFAULT_PORT]
+    for key in ("secondaryPort", "tertiaryPort"):
+        value = local.get(key)
+        if _valid_port(value) and value not in ports:
+            ports.append(value)
+    return ports
+
+
+def parse_port_specs(text: str) -> list[tuple[int, int, str]]:
+    """firewall-cmd --list-ports output -> [(low, high, protocol)]."""
+    specs = []
+    for item in (text or "").split():
+        port, _, proto = item.partition("/")
+        low, _, high = port.partition("-")
+        try:
+            a = int(low)
+            b = int(high) if high else a
+        except ValueError:
+            continue
+        specs.append((a, b, proto))
+    return specs
+
+
+def _covers(specs: list[tuple[int, int, str]], port: int, proto: str = "udp") -> bool:
+    return any(a <= port <= b and p == proto for a, b, p in specs)
+
+
 # --------------------------------------------------------------------------
 # the local JSON API
 # --------------------------------------------------------------------------
@@ -117,11 +169,13 @@ class LocalApi(QObject):
         self.host = "127.0.0.1"
         self.port = DEFAULT_PORT
         self.token = ""
+        self.rejected = False            # the daemon answered 401 to this token
         self._live: set = set()
         self._generation = 0
 
     def configure(self, host: str, port: int, token: str) -> None:
         self.host, self.port, self.token = host, int(port), token
+        self.rejected = False
 
     @property
     def ready(self) -> bool:
@@ -148,11 +202,15 @@ class LocalApi(QObject):
             reply.deleteLater()
             if generation != self._generation:
                 return                       # abandoned by quiesce(); say nothing
+            # Before the generic error: a 401 comes back with an empty body, so
+            # checking for an error first swallowed it as "Host requires
+            # authentication" and the tray spun in "Starting" for ever.
+            if status and int(status) == 401:
+                self.rejected = True
+                callback(False, None, "The service rejected the auth token.")
+                return
             if err != QNetworkReply.NoError and not raw:
                 callback(False, None, reply.errorString())
-                return
-            if status and int(status) == 401:
-                callback(False, None, "The service rejected the auth token.")
                 return
             if status and int(status) >= 400:
                 callback(False, None, f"HTTP {status}: {raw.decode(errors='replace')[:200]}")
@@ -162,6 +220,7 @@ class LocalApi(QObject):
             except ValueError:
                 callback(False, None, "The service returned something that is not JSON.")
                 return
+            self.rejected = False
             callback(True, data, "")
 
         reply.finished.connect(finished)
@@ -204,6 +263,169 @@ class LocalApi(QObject):
 
 
 # --------------------------------------------------------------------------
+# firewalld, asked in the background
+# --------------------------------------------------------------------------
+class FirewallWatch(QObject):
+    """What firewalld says, fetched off the GUI thread and kept for a while.
+
+    firewall-cmd is a Python program talking D-Bus, a fifth of a second a call.
+    Asking it synchronously - every time the menu opened, on every poll while
+    the settings window was up - is what made both of them stall. Nothing here
+    blocks: a caller gets the last answer, or None while there is none yet, and
+    a refresh is queued behind it. `changed` fires when an answer lands.
+    """
+
+    changed = Signal()
+    MAX_AGE = 20.0
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.running: bool | None = None       # None: not asked yet
+        self.default_zone = ""
+        self.zones: list[str] = []
+        self._ports: dict[str, list[tuple[int, int, str]]] = {}
+        self._asked: dict[str, float] = {}     # zone -> when it was last queued
+        self._checked = 0.0                    # when running/default were read
+        self._queue: list[str] = []
+        self._busy = False
+
+    # -------------------------------------------------------------- answers
+    def open_ports(self, zone: str, ports: list[int]) -> list[int] | None:
+        """Which of `ports` are open in `zone` (default zone if ""), or None."""
+        zone = zone or self.default_zone
+        if not zone:
+            self._kick("")
+            return None
+        if time.monotonic() - self._asked.get(zone, -1e9) > self.MAX_AGE:
+            self._kick(zone)
+        specs = self._ports.get(zone)
+        if self.running is not True or specs is None or not ports:
+            return None
+        return [p for p in ports if _covers(specs, p)]
+
+    def all_open(self, zone: str, ports: list[int]) -> bool | None:
+        found = self.open_ports(zone, ports)
+        return None if found is None else len(found) == len(ports)
+
+    def forget(self) -> None:
+        """Drop every answer, after we changed the firewall ourselves."""
+        self._ports.clear()
+        self._asked.clear()
+        self._checked = 0.0
+        self._kick("")
+
+    # -------------------------------------------------------------- asking
+    def _kick(self, zone: str) -> None:
+        now = time.monotonic()
+        if zone:
+            self._asked[zone] = now
+            if zone not in self._queue:
+                self._queue.append(zone)
+        if self._busy:
+            return
+        if self.running is None or now - self._checked > self.MAX_AGE:
+            self._busy = True
+            self._checked = now
+            system.run_async("firewall-cmd", ["--get-default-zone"],
+                             self._got_default, self, 8000)
+        elif self.running is False:
+            self._queue.clear()                # nothing to ask until it is back
+        elif self._queue:
+            self._busy = True
+            self._next()
+
+    def _got_default(self, code: int, out: str, _err: str) -> None:
+        if code != 0 or not out.strip():
+            self.running = False
+            self.default_zone = ""
+            self._queue.clear()
+            self._finish()
+            return
+        self.running = True
+        self.default_zone = out.strip()
+        if self.default_zone not in self._ports and self.default_zone not in self._queue:
+            self._asked[self.default_zone] = time.monotonic()
+            self._queue.append(self.default_zone)
+        if self.zones:
+            self._next()
+        else:
+            system.run_async("firewall-cmd", ["--get-zones"], self._got_zones, self, 8000)
+
+    def _got_zones(self, code: int, out: str, _err: str) -> None:
+        if code == 0:
+            self.zones = sorted(out.split())
+        self._next()
+
+    def _next(self) -> None:
+        if not self._queue:
+            self._finish()
+            return
+        zone = self._queue.pop(0)
+        system.run_async("firewall-cmd", [f"--zone={zone}", "--list-ports"],
+                         lambda code, out, _e, z=zone: self._got_ports(z, code, out),
+                         self, 8000)
+
+    def _got_ports(self, zone: str, code: int, out: str) -> None:
+        if code == 0:
+            self._ports[zone] = parse_port_specs(out)
+        else:
+            self._ports.pop(zone, None)
+        self._next()
+
+    def _finish(self) -> None:
+        self._busy = False
+        self.changed.emit()
+        if self._queue:                        # asked for more while we were out
+            self._kick("")
+
+
+# --------------------------------------------------------------------------
+# pinging a subnet, off the GUI thread
+# --------------------------------------------------------------------------
+class SubnetScan(QObject):
+    """scan_subnet() in a worker thread. It pings up to 254 hosts and waits a
+    second for each batch, which froze the whole tray - menu included - for
+    several seconds when it ran on the GUI thread."""
+
+    finished = Signal(int, str)       # addresses probed, what was scanned
+    _done = Signal(int, str)          # from the worker; crosses to the GUI thread
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._busy = False
+        # Bound to a method of this QObject, so Qt queues it onto the thread
+        # the scanner lives in; `finished` is then only ever emitted there.
+        self._done.connect(self._finish)
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    def start(self, networks: list[dict]) -> bool:
+        """False if a scan is already running."""
+        if self._busy:
+            return False
+        self._busy = True
+        nets = [dict(n) for n in networks]
+        label = ", ".join(n.get("name") or n.get("nwid", "") for n in nets)
+        threading.Thread(target=self._run, args=(nets, label), daemon=True).start()
+        return True
+
+    def _run(self, nets: list[dict], label: str) -> None:
+        total = 0
+        for net in nets:
+            try:
+                total += scan_subnet(net)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._done.emit(total, label)
+
+    def _finish(self, total: int, label: str) -> None:
+        self._busy = False
+        self.finished.emit(total, label)
+
+
+# --------------------------------------------------------------------------
 # the monitor
 # --------------------------------------------------------------------------
 class ZeroTierMonitor(QObject):
@@ -219,6 +441,10 @@ class ZeroTierMonitor(QObject):
         super().__init__(parent)
         self.cfg = cfg
         self.api = LocalApi(self)
+        self.fw = FirewallWatch(self)
+        self.fw.changed.connect(self.changed)
+        self.scanner = SubnetScan(self)
+        self.scanner.finished.connect(lambda *_: self.poll_peers())
 
         self.unit = str(cfg.get("service_name", "zerotier-one.service"))
         self.installed = False
@@ -236,9 +462,10 @@ class ZeroTierMonitor(QObject):
 
         self._state = "stopped"
         self._member_keys: set[str] = set()
+        self._members: dict[str, list[dict]] = {}
         self._neigh: dict[str, str] = {}
         self._lan: list[tuple[str, str]] = []
-        self._fw_cache: tuple | None = None
+        self._local: tuple[float, dict] = (0.0, {})
         self._api_paused = False
         self._svc_seen = False
         self._first_pass = True
@@ -432,12 +659,16 @@ class ZeroTierMonitor(QObject):
     def state(self) -> str:
         return self._state
 
+    @property
+    def token_rejected(self) -> bool:
+        return self.api.rejected
+
     def _compute_state(self) -> str:
         if self.installed and self.unit_state == "failed":
             return "error"
         if not self.running:
             return "stopped"
-        if not self.has_token:
+        if not self.has_token or self.api.rejected:
             return "noauth"
         if not self.api_ok:
             return "starting"
@@ -459,7 +690,11 @@ class ZeroTierMonitor(QObject):
             self._state = new
             if not self._first_pass:
                 self.stateChanged.emit(old, new)
-        keys = {m["key"] for n in self.networks for m in self.members_of(n)}
+        # Worked out once per change, not once per caller: the menu, the
+        # tooltip, the badge and the snapshot all ask, and they ask often.
+        self._members = {n.get("nwid", ""): self._compute_members(n)
+                         for n in self.networks if n.get("nwid")}
+        keys = {m["key"] for ms in self._members.values() for m in ms}
         if keys != self._member_keys:
             self._member_keys = keys
             if not self._first_pass:
@@ -472,6 +707,12 @@ class ZeroTierMonitor(QObject):
         return (nwid or "")[:NODE_LEN]
 
     def members_of(self, network: dict) -> list[dict]:
+        cached = self._members.get(network.get("nwid", ""))
+        if cached is not None:
+            return cached
+        return self._compute_members(network)
+
+    def _compute_members(self, network: dict) -> list[dict]:
         """Everyone else zerotier-one can currently see on this network.
 
         The local API lists VL1 peers globally, not per network, so two things
@@ -588,6 +829,7 @@ class ZeroTierMonitor(QObject):
             "unit_state": self.unit_state,
             "boot_enabled": self.boot_enabled,
             "has_token": self.has_token,
+            "token_rejected": self.api.rejected,
             "token_source": self.token_source,
             "api_ok": self.api_ok,
             "api_error": self.api_error,
@@ -637,37 +879,36 @@ class ZeroTierMonitor(QObject):
 
         The traffic arrives on the physical link, not on a zt interface, so the
         right zone is the one holding the real NIC - by default, the default
-        zone.
+        zone. "" until firewalld has answered.
         """
         chosen = str(self.cfg.get("firewall_zone", "")).strip()
-        if chosen:
-            return chosen
-        return system.firewall_default_zone()
+        return chosen or self.fw.default_zone
 
-    def firewall_open(self, max_age: float = 20.0) -> bool | None:
-        """True/False if every ZeroTier port is open, None if unknown.
+    def firewall_ports(self) -> list[int]:
+        """The ports "Allow the ZeroTier ports" means: see stable_ports()."""
+        settings = (self.status.get("config") or {}).get("settings") or {}
+        primary = settings.get("primaryPort")
+        if not _valid_port(primary):
+            primary = find_port(self.cfg.home_dir())
+        return stable_ports(primary, self._local_settings())
 
-        Each answer costs a firewall-cmd per port, so it is cached: the menu is
-        rebuilt whenever anything moves, and none of that should shell out.
+    def _local_settings(self) -> dict:
+        stamp, data = self._local
+        if time.monotonic() - stamp > 30.0:
+            data = local_settings(self.cfg.home_dir())
+            self._local = (time.monotonic(), data)
+        return data
+
+    def firewall_open(self) -> bool | None:
+        """True/False if the ZeroTier ports are open, None if not known (yet).
+
+        Never blocks: the answer comes from FirewallWatch's cache.
         """
-        zone = self.firewall_zone()
-        ports = tuple(self.snapshot()["ports"])
-        key = (zone, ports)
-        now = time.monotonic()
-        cached = self._fw_cache
-        if cached and cached[0] == key and now - cached[1] < max_age:
-            return cached[2]
-
-        if not system.firewalld_running() or not zone or not ports:
-            answer = None
-        else:
-            answer = all(system.firewall_port_open(zone, p) for p in ports)
-        self._fw_cache = (key, now, answer)
-        return answer
+        return self.fw.all_open(self.firewall_zone(), self.firewall_ports())
 
     def forget_firewall(self) -> None:
-        """Drop the cache after we changed the firewall ourselves."""
-        self._fw_cache = None
+        """Ask again, after we changed the firewall ourselves."""
+        self.fw.forget()
 
 
 def ports_from(settings: dict) -> list[int]:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import getpass
+from dataclasses import astuple
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Qt
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QInputDialog,
@@ -60,7 +61,39 @@ class ZeroTierTray(QObject):
 
         self.phase = 0.0
         self._pending = ""
-        self._menu_fingerprint_cache: tuple | None = None
+        self._no_tray = False
+        self._scan_mine = False
+
+        # The menu is exported over D-Bus and drawn by the panel, which holds
+        # on to item IDs. So it is only rebuilt when its *shape* changes, never
+        # while it is open, and everything else - labels, ticks - is updated in
+        # place through these callbacks.
+        self._menu_structure_cache: tuple | None = None
+        self._menu_open = False
+        self._menu_dirty = False
+        self._live_items: list = []
+        # When is the menu open? The panel says when it opens it (AboutToShow,
+        # for the menu and for each submenu), but under Plasma nothing ever
+        # says it closed: KDE's exporter drops the "closed" event, so
+        # aboutToHide never comes. So: open from any sign of use until a click,
+        # an aboutToHide where there is one, or this long with no activity.
+        self._menu_idle = QTimer(self)
+        self._menu_idle.setSingleShot(True)
+        self._menu_idle.setInterval(15000)
+        self._menu_idle.timeout.connect(self._menu_closed)
+        # A host that does send "closed" sends it *before* "clicked", and the
+        # click has to find the item it was aimed at: a short grace period.
+        self._menu_settle = QTimer(self)
+        self._menu_settle.setSingleShot(True)
+        self._menu_settle.setInterval(600)
+        self._menu_settle.timeout.connect(self._rebuild_if_dirty)
+        self._members_now: dict[str, dict] = {}
+
+        # What was last handed to the panel, so an unchanged icon or tooltip is
+        # not re-sent - each one is a D-Bus signal and a pixmap fetch.
+        self._icon_key: tuple | None = None
+        self._tooltip_text: str | None = None
+        self._ctx_cache: icons.RenderCtx | None = None
 
         self.tray = QSystemTrayIcon(parent)
         self.tray.setIcon(icons.app_icon())
@@ -68,7 +101,11 @@ class ZeroTierTray(QObject):
 
         self.menu = QMenu()
         self.tray.setContextMenu(self.menu)
-        self.menu.aboutToShow.connect(self.rebuild_menu)
+        self.menu.aboutToShow.connect(self._menu_about_to_show)
+        self.menu.aboutToHide.connect(self._menu_about_to_hide)
+        # Fires for a click anywhere in the menu, submenus included, however
+        # it arrived - and a click is the one close every host reports.
+        self.menu.triggered.connect(lambda _a: self._menu_about_to_hide())
 
         self.anim = QTimer(self)
         self.anim.timeout.connect(self._tick)
@@ -79,6 +116,7 @@ class ZeroTierTray(QObject):
         monitor.membersChanged.connect(self._on_members)
         self.priv.result.connect(self._on_priv)
         monitor.watch_privileged(self.priv)
+        monitor.scanner.finished.connect(self._scan_done)
 
         self.apply_settings()
         self.rebuild_menu()
@@ -99,9 +137,11 @@ class ZeroTierTray(QObject):
         """
         self._tray_wait_elapsed = 0
         self._tray_notice = None
-        # With no tray, closing the last window has to be able to end the
-        # program, or it would sit there invisible and unkillable.
-        QApplication.instance().setQuitOnLastWindowClosed(True)
+        # With no tray, closing the settings window ends the program, or it
+        # would sit there invisible. Not quitOnLastWindowClosed: that also
+        # fired when the notice below was dismissed, so "Wait in the
+        # background" quit instead of waiting.
+        self._no_tray = True
         self._tray_timer = QTimer(self)
         self._tray_timer.timeout.connect(self._poll_for_tray)
         self._tray_timer.start(1000)
@@ -109,7 +149,7 @@ class ZeroTierTray(QObject):
     def _poll_for_tray(self) -> None:
         if QSystemTrayIcon.isSystemTrayAvailable():
             self._tray_timer.stop()
-            QApplication.instance().setQuitOnLastWindowClosed(False)
+            self._no_tray = False
             self.tray.show()
             self.refresh()
             if self._tray_notice is not None:
@@ -181,7 +221,12 @@ class ZeroTierTray(QObject):
 
     # ------------------------------------------------------------------ paint
     def _ctx(self) -> icons.RenderCtx:
-        snap = self.monitor.snapshot()
+        """The render context, worked out once per change rather than per frame."""
+        if self._ctx_cache is None:
+            self._ctx_cache = self._build_ctx(self.monitor.snapshot())
+        return self._ctx_cache
+
+    def _build_ctx(self, snap: dict) -> icons.RenderCtx:
         style = str(self.cfg.get("icon_style", "zerotier"))
         source = str(self.cfg.get("badge_source", "members"))
         count = snap["member_count"] if source == "members" else snap["network_count"]
@@ -213,13 +258,18 @@ class ZeroTierTray(QObject):
 
     def _paint(self) -> None:
         state = self.monitor.state()
-        self.tray.setIcon(icons.render_icon(
-            str(self.cfg.get("icon_style", "zerotier")),
-            self.cfg.color_for(state),
-            self._current_animation(),
-            self.phase,
-            self._ctx(),
-        ))
+        style = str(self.cfg.get("icon_style", "zerotier"))
+        color = self.cfg.color_for(state)
+        animation = self._current_animation()
+        phase = self.phase if animation != "none" else 0.0
+        ctx = self._ctx()
+        # Every setIcon is a NewIcon signal and a full pixmap fetch by the
+        # panel. Resting, the icon does not change, so do not say it did.
+        key = (style, color, animation, phase, astuple(ctx))
+        if key == self._icon_key:
+            return
+        self._icon_key = key
+        self.tray.setIcon(icons.render_icon(style, color, animation, phase, ctx))
 
     def refresh(self) -> None:
         snap = self.monitor.snapshot()
@@ -227,34 +277,130 @@ class ZeroTierTray(QObject):
             self.tray.hide()
         elif not self.tray.isVisible():
             self.tray.show()
+        self._ctx_cache = self._build_ctx(snap)
         self._restart_anim_if_needed()
         self._paint()
-        self.tray.setToolTip(self._tooltip(snap))
+        tooltip = self._tooltip(snap)
+        if tooltip != self._tooltip_text:
+            self._tooltip_text = tooltip
+            self.tray.setToolTip(tooltip)
 
         # Keep the exported menu in step with reality, not only with the last
         # time somebody opened it: a D-Bus tray hands the panel whatever layout
-        # it was given, and a stale one says "not installed" for ever.
-        fingerprint = self._menu_fingerprint(snap)
-        if fingerprint != self._menu_fingerprint_cache and not self.menu.isVisible():
-            self._menu_fingerprint_cache = fingerprint
-            self.rebuild_menu()
+        # it was given, and a stale one says "not installed" for ever. But a
+        # rebuild replaces every item ID, so while the panel is showing the
+        # menu it waits - rebuilding under it is what froze it and ate clicks.
+        if self._menu_structure(snap) != self._menu_structure_cache:
+            if self._menu_open or self._menu_settle.isActive():
+                self._menu_dirty = True
+                self._update_menu(snap)
+            else:
+                self.rebuild_menu()
+        else:
+            self._update_menu(snap)
 
-    def _menu_fingerprint(self, snap: dict) -> tuple:
+    def _member_limit(self) -> int:
+        return max(1, int(self.cfg.get("member_limit", 24)))
+
+    def _menu_structure(self, snap: dict) -> tuple:
+        """What decides which entries the menu has - not what they say.
+
+        Latency, reachability, a member's IP, the state line and every tick
+        change all the time; they are updated in place by _update_menu(), which
+        keeps the item IDs. Only a change in here means a rebuild.
+        """
         addrs = self.monitor.my_addresses()
+        nets = []
+        for n in snap["networks"]:
+            nets.append((
+                n.get("nwid"), n.get("name"), n.get("status"),
+                tuple(n.get("assignedAddresses") or []),
+                n.get("portDeviceName"), n.get("mtu"), n.get("type"),
+                tuple(sorted(m["key"] for m in self.monitor.members_of(n))),
+            ))
+        firewall_known = snap["installed"] and self.monitor.firewall_open() is not None
         return (
-            snap["state"], snap["installed"], snap["running"],
-            snap["boot_enabled"], snap["address"], tuple(snap["ports"]),
-            tuple((n.get("nwid"), n.get("name"), n.get("status"),
-                   tuple(n.get("assignedAddresses") or []),
-                   n.get("portDeviceName"),
-                   n.get("allowManaged"), n.get("allowGlobal"),
-                   n.get("allowDefault"), n.get("allowDNS"))
-                  for n in snap["networks"]),
-            tuple(sorted(f"{m['key']}|{m['ip']}|{m['reachable']}"
-                         for m in self.monitor.all_members())),
-            tuple(addrs["public_v4"]), tuple(addrs["public_v6"]),
-            tuple(addrs["lan"]),
+            self.updates.available,
+            snap["installed"], snap["running"], snap["has_token"],
+            snap["state"] == "noauth", snap["token_rejected"],
+            bool(snap["address"]),
+            tuple(nets),
+            tuple(addrs["zerotier"]), tuple(addrs["public_v4"]),
+            tuple(addrs["public_v6"]), tuple(addrs["lan"]),
+            firewall_known,
+            bool(self.cfg.get("show_addresses_in_menu", True)),
+            self._member_limit(),
         )
+
+    def _menu_about_to_show(self) -> None:
+        """Never a rebuild here.
+
+        By the time this runs the panel has already decided to show the layout
+        it holds - KDE's exporter answers AboutToShow with "nothing changed" -
+        so rebuilding now swaps every item ID out from under the open menu:
+        submenus that will not load, clicks that land nowhere. 1.0.3 rebuilt
+        here on every open. The exported menu is kept current while it is
+        closed instead, so there is nothing to catch up on.
+        """
+        self._menu_activity()
+        self._update_menu(self.monitor.snapshot())
+
+    def _menu_activity(self) -> None:
+        self._menu_open = True
+        self._menu_settle.stop()
+        self._menu_idle.start()
+
+    def _menu_about_to_hide(self) -> None:
+        self._menu_idle.stop()
+        self._menu_open = False
+        self._menu_settle.start()
+
+    def _menu_closed(self) -> None:
+        self._menu_open = False
+        self._rebuild_if_dirty()
+
+    def _rebuild_if_dirty(self) -> None:
+        if not self._menu_dirty or self._menu_open or self._menu_settle.isActive():
+            return
+        if QApplication.activeModalWidget() is not None:
+            # A confirmation opened from a menu click is still up, and that
+            # click's action is on the stack underneath it: wait it out.
+            self._menu_settle.start()
+            return
+        self.rebuild_menu()
+
+    def _submenu(self, parent: QMenu, title: str) -> QMenu:
+        """addMenu(), plus: opening it counts as the menu being in use."""
+        sub = parent.addMenu(title)
+        sub.aboutToShow.connect(self._menu_activity)
+        return sub
+
+    def _update_menu(self, snap: dict) -> None:
+        self._members_now = {m["key"]: m for m in self.monitor.all_members()}
+        for update in self._live_items:
+            update(snap)
+
+    def _live(self, menu: QMenu, update, checkable: bool = False) -> QAction:
+        """An entry whose text or tick follows the live state.
+
+        update(action, snap) sets it; it runs now and on every refresh.
+        """
+        act = QAction(menu)
+        act.setCheckable(checkable)
+        menu.addAction(act)
+        self._live_items.append(lambda snap, a=act: update(a, snap))
+        return act
+
+    def _clear_menu(self) -> None:
+        # QMenu.clear() deletes the actions but not the submenus addMenu()
+        # parented to this menu, so every rebuild used to leak all of them.
+        # deleteLater, because this can run from inside one of their signals.
+        m = self.menu
+        for sub in m.findChildren(QMenu, "", Qt.FindDirectChildrenOnly):
+            sub.deleteLater()
+        for action in m.actions():
+            m.removeAction(action)
+            action.deleteLater()
 
     def _tooltip(self, snap: dict) -> str:
         lines = [f"{APP_NAME} - {STATE_LABELS.get(snap['state'], snap['state'])}"]
@@ -262,7 +408,9 @@ class ZeroTierTray(QObject):
             return lines[0]
 
         if snap["state"] == "noauth":
-            lines.append("Grant access to the service from the menu to see anything.")
+            lines.append("ZeroTier rejected the saved token - grant access again "
+                         "from the menu." if snap["token_rejected"] else
+                         "Grant access to the service from the menu to see anything.")
             return "\n".join(lines)
         if not snap["running"]:
             lines.append("zerotier-one is not running." if snap["installed"]
@@ -292,9 +440,11 @@ class ZeroTierTray(QObject):
     # ------------------------------------------------------------------- menu
     def rebuild_menu(self) -> None:
         snap = self.monitor.snapshot()
-        self._menu_fingerprint_cache = self._menu_fingerprint(snap)
+        self._menu_structure_cache = self._menu_structure(snap)
+        self._menu_dirty = False
+        self._live_items = []
+        self._clear_menu()
         m = self.menu
-        m.clear()
 
         if self.updates.available:
             act = m.addAction(f"Update available: {self.updates.latest}")
@@ -302,22 +452,29 @@ class ZeroTierTray(QObject):
             act.triggered.connect(self._offer_update)
             m.addSeparator()
 
-        header = m.addAction(f"{APP_NAME} - {STATE_LABELS.get(snap['state'], snap['state'])}")
+        header = self._live(m, lambda a, s: a.setText(
+            f"{APP_NAME} - {STATE_LABELS.get(s['state'], s['state'])}"))
         header.setEnabled(False)
 
         if snap["address"]:
-            act = m.addAction(f"Node {snap['address']}   (click to copy)")
-            act.triggered.connect(lambda _c=False, v=snap["address"]:
-                                  self._copy(v, "Node ID copied."))
+            node = self._live(m, lambda a, s: a.setText(
+                f"Node {s['address']}   (click to copy)"))
+            node.triggered.connect(lambda _c=False: self._copy(
+                self.monitor.status.get("address", ""), "Node ID copied."))
 
         if self.cfg.get("show_addresses_in_menu", True):
             self._add_addresses(m)
 
         if snap["state"] == "noauth":
             m.addSeparator()
-            note = m.addAction("This tray cannot read the service token yet")
-            note.setEnabled(False)
-            m.addAction("Grant access to ZeroTier...", self._grant)
+            if snap["token_rejected"]:
+                note = m.addAction("ZeroTier rejected this tray's token")
+                note.setEnabled(False)
+                m.addAction("Grant access again...", self._grant)
+            else:
+                note = m.addAction("This tray cannot read the service token yet")
+                note.setEnabled(False)
+                m.addAction("Grant access to ZeroTier...", self._grant)
 
         # ---- networks -------------------------------------------------
         m.addSeparator()
@@ -340,44 +497,38 @@ class ZeroTierTray(QObject):
         else:
             m.addAction("Start ZeroTier", lambda: self._privileged(["start"]))
 
+        # Checkable entries act on `triggered`, which only a click emits, so
+        # the in-place updates below can set their ticks without firing them.
         if snap["installed"]:
-            boot = QAction("Start with the system", m)
-            boot.setCheckable(True)
-            boot.setChecked(snap["boot_enabled"])
-            boot.toggled.connect(self._set_boot)
-            m.addAction(boot)
+            boot = self._live(m, lambda a, s: a.setChecked(s["boot_enabled"]),
+                              checkable=True)
+            boot.setText("Start with the system")
+            boot.triggered.connect(self._set_boot)
 
-            fw = self.monitor.firewall_open()
-            if fw is not None:
-                zone = self.monitor.firewall_zone()
-                ports = ", ".join(str(p) for p in snap["ports"])
-                act = QAction(f"Allow UDP {ports} in zone \"{zone}\"", m)
-                act.setCheckable(True)
-                act.setChecked(bool(fw))
-                act.setToolTip("Inbound UDP lets peers reach you directly instead "
-                               "of through a relay.")
-                act.toggled.connect(self._set_firewall)
-                m.addAction(act)
+            if self.monitor.firewall_open() is not None:
+                fw = self._live(m, self._sync_firewall_action, checkable=True)
+                fw.setToolTip("Inbound UDP lets peers reach you directly instead "
+                              "of through a relay.")
+                fw.triggered.connect(self._set_firewall)
 
         # ---- appearance and the rest ----------------------------------
         m.addSeparator()
-        style_menu = m.addMenu("Icon")
+        style_menu = self._submenu(m, "Icon")
         group = QActionGroup(style_menu)
         group.setExclusive(True)
-        current = str(self.cfg.get("icon_style", "zerotier"))
         for key, label in icons.ICON_STYLES:
             act = QAction(label, style_menu)
             act.setCheckable(True)
-            act.setChecked(key == current)
             act.triggered.connect(lambda _c=False, k=key: self._set_style(k))
             group.addAction(act)
             style_menu.addAction(act)
+            self._live_items.append(lambda _s, a=act, k=key: a.setChecked(
+                k == str(self.cfg.get("icon_style", "zerotier"))))
 
-        quiet = QAction("Silence notifications", m)
-        quiet.setCheckable(True)
-        quiet.setChecked(not self.cfg.get("notifications_enabled", True))
-        quiet.toggled.connect(self._set_quiet)
-        m.addAction(quiet)
+        quiet = self._live(m, lambda a, s: a.setChecked(
+            not self.cfg.get("notifications_enabled", True)), checkable=True)
+        quiet.setText("Silence notifications")
+        quiet.triggered.connect(self._set_quiet)
 
         m.addAction("Settings...", self.open_settings)
         m.addSeparator()
@@ -386,6 +537,14 @@ class ZeroTierTray(QObject):
         m.addAction("Check for updates", self._check_updates)
         m.addAction("About", self._about)
         m.addAction("Quit", self._quit)
+
+        self._update_menu(snap)
+
+    def _sync_firewall_action(self, act: QAction, _snap: dict) -> None:
+        fw = self.monitor.firewall_open()
+        ports = ", ".join(str(p) for p in self.monitor.firewall_ports())
+        act.setText(f"Allow UDP {ports} in zone \"{self.monitor.firewall_zone()}\"")
+        act.setChecked(bool(fw))
 
     def _add_addresses(self, m: QMenu) -> None:
         """My IP, right at the top, plus everything else one hop away."""
@@ -416,7 +575,7 @@ class ZeroTierTray(QObject):
             self._add_address_submenu(m, addrs)
 
     def _add_address_submenu(self, m: QMenu, addrs: dict) -> None:
-        sub = m.addMenu("My addresses")
+        sub = self._submenu(m, "My addresses")
 
         def group(title: str, rows: list[tuple[str, str]]) -> None:
             if not rows:
@@ -455,7 +614,7 @@ class ZeroTierTray(QObject):
         nwid = net.get("nwid", "")
         name = net.get("name") or nwid
         status = net.get("status", "")
-        sub = parent.addMenu(f"{name}  ({NETWORK_STATUS_TEXT.get(status, status)})")
+        sub = self._submenu(parent, f"{name}  ({NETWORK_STATUS_TEXT.get(status, status)})")
 
         for addr in net.get("assignedAddresses") or []:
             act = sub.addAction(f"{addr}   (click to copy)")
@@ -475,15 +634,20 @@ class ZeroTierTray(QObject):
         # members
         sub.addSeparator()
         members = self.monitor.members_of(net)
-        limit = max(1, int(self.cfg.get("member_limit", 24)))
+        limit = self._member_limit()
         if members:
-            reach = sum(1 for x in members if x["reachable"])
-            people = sub.addMenu(f"Members ({reach} of {len(members)} reachable)")
+            people = self._submenu(sub, "Members")
+
+            def title(_s, menu=people, n=nwid) -> None:
+                current = self.monitor.members_of({"nwid": n})
+                reach = sum(1 for x in current if x["reachable"])
+                menu.setTitle(f"Members ({reach} of {len(current)} reachable)")
+            self._live_items.append(title)
+
             for mem in members[:limit]:
-                act = people.addAction(member_line(mem))
-                target = mem["ip"] or mem["address"]
-                act.triggered.connect(lambda _c=False, v=target:
-                                      self._copy(v, "Copied."))
+                key = mem["key"]
+                act = self._live(people, lambda a, _s, k=key: self._sync_member(a, k))
+                act.triggered.connect(lambda _c=False, k=key: self._copy_member(k))
             if len(members) > limit:
                 more = people.addAction(f"...and {len(members) - limit} more")
                 more.setEnabled(False)
@@ -499,31 +663,45 @@ class ZeroTierTray(QObject):
         # per-network switches
         sub.addSeparator()
         for key, label, tip in zt.NETWORK_FLAGS:
-            act = QAction(label, sub)
-            act.setCheckable(True)
-            act.setChecked(bool(net.get(key, False)))
+            act = self._live(sub, lambda a, s, n=nwid, k=key: a.setChecked(bool(
+                next((x for x in s["networks"] if x.get("nwid") == n), {}).get(k))),
+                checkable=True)
+            act.setText(label)
             act.setToolTip(tip)
-            act.toggled.connect(
+            act.triggered.connect(
                 lambda checked, n=nwid, k=key: self._set_flag(n, k, checked))
-            sub.addAction(act)
 
         sub.addSeparator()
         sub.addAction("Leave this network", lambda _c=False, n=nwid, t=name:
                       self._leave(n, t))
 
+    def _sync_member(self, act: QAction, key: str) -> None:
+        mem = self._members_now.get(key)
+        if mem:
+            act.setText(member_line(mem))
+
+    def _copy_member(self, key: str) -> None:
+        mem = self._members_now.get(key)
+        if mem:
+            self._copy(mem["ip"] or mem["address"], "Copied.")
+
     # ------------------------------------------------------------------ acts
     def _copy(self, value: str, note: str) -> None:
+        if not value:
+            return
         QApplication.clipboard().setText(value)
         self._notify(APP_NAME, note)
 
     def _set_quiet(self, quiet: bool) -> None:
         self.cfg["notifications_enabled"] = not quiet
         self.cfg.save()
+        if self.settings_dialog is not None:
+            self.settings_dialog.notifications_enabled.setChecked(not quiet)
 
     def _set_style(self, key: str) -> None:
         self.cfg["icon_style"] = key
         self.cfg.save()
-        self._paint()
+        self.refresh()
 
     def _join(self) -> None:
         nwid, ok = QInputDialog.getText(
@@ -580,14 +758,15 @@ class ZeroTierTray(QObject):
                        "This network has not assigned an address to this machine "
                        "yet, so there is no subnet to look at.")
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            probed = zt.scan_subnet(net)
-        finally:
-            QApplication.restoreOverrideCursor()
-        self.monitor.poll_peers()
-        self._notify(APP_NAME, f"Pinged {probed} addresses on "
-                               f"{net.get('name') or net.get('nwid')}.")
+        if not self.monitor.scanner.start([net]):
+            self._notify(APP_NAME, "A scan is already running.")
+            return
+        self._scan_mine = True
+
+    def _scan_done(self, probed: int, label: str) -> None:
+        if self._scan_mine:
+            self._scan_mine = False
+            self._notify(APP_NAME, f"Pinged {probed} addresses on {label}.")
 
     def _stop(self) -> None:
         if self.cfg.get("confirm_stop", True):
@@ -640,7 +819,6 @@ class ZeroTierTray(QObject):
         pending, self._pending = self._pending, ""
         if pending == "firewall":
             self.monitor.forget_firewall()
-            self._menu_fingerprint_cache = None
         if ok:
             if pending == "grant":
                 self.monitor.reload_token()
@@ -661,7 +839,7 @@ class ZeroTierTray(QObject):
         """The menu entry. Nothing checks on its own; this is the only path."""
         def answered(ok: bool, message: str) -> None:
             self.updates.checked.disconnect(answered)
-            self._menu_fingerprint_cache = None    # let the banner in or out
+            self.refresh()                         # let the banner in or out
             if not ok:
                 self._warn("Could not check for updates", message)
             elif self.updates.available:
@@ -732,10 +910,16 @@ class ZeroTierTray(QObject):
             self.settings_dialog = SettingsDialog(self.cfg, self.monitor,
                                                  self.priv, self.updates)
             self.settings_dialog.applied.connect(self._on_settings_applied)
+            self.settings_dialog.finished.connect(self._settings_closed)
         self.settings_dialog.load_from_config()
         self.settings_dialog.show()
         self.settings_dialog.raise_()
         self.settings_dialog.activateWindow()
+
+    def _settings_closed(self, _result: int) -> None:
+        # With no tray to come back to, the window was the whole program.
+        if self._no_tray:
+            QApplication.quit()
 
     def _on_settings_applied(self) -> None:
         self.cfg.save()
@@ -783,7 +967,25 @@ class ZeroTierTray(QObject):
             else:
                 self._privileged(["start"])
         elif action == "menu":
-            self.menu.popup(self.tray.geometry().center())
+            self._popup_menu()
+
+    def _popup_menu(self) -> None:
+        """Left click shows the menu - where a client is allowed to.
+
+        A StatusNotifierItem tray (Plasma, and most panels now) never says
+        where the icon is: geometry() is empty, and popping up at its "centre"
+        meant the top-left corner of the screen. On X11 the cursor is the next
+        best anchor. On Wayland a client cannot place a popup with nothing of
+        its own to hang it on - Qt drops it and nothing appears - so the click
+        opens the window instead; the panel shows the menu on right click.
+        """
+        geometry = self.tray.geometry()
+        if geometry.isValid():
+            self.menu.popup(geometry.center())
+        elif QGuiApplication.platformName() != "wayland":
+            self.menu.popup(QCursor.pos())
+        else:
+            self.open_settings()
 
     # ------------------------------------------------------------ notifications
     def _notify(self, title: str, body: str) -> None:
@@ -798,7 +1000,10 @@ class ZeroTierTray(QObject):
                          if new == "denied" else
                          "A joined network ID does not exist.")
         elif self.cfg.get("notify_on_service", True):
-            if new == "stopped" and old != "stopped":
+            if new == "noauth" and self.monitor.token_rejected:
+                self._notify(APP_NAME, "ZeroTier rejected this tray's token. "
+                                       "Grant access again from the menu.")
+            elif new == "stopped" and old != "stopped":
                 self._notify(APP_NAME, "ZeroTier stopped.")
             elif new == "error":
                 self._notify(APP_NAME, "The zerotier-one service failed.")

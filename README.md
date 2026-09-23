@@ -24,9 +24,9 @@ starts it. The same line upgrades an existing install. Or take a package from
 
 | Distro | Command |
 |---|---|
-| Fedora / RHEL | `sudo dnf install ./zerotier-tray-kde-1.0.3-1.fc46.noarch.rpm` |
-| Arch / CachyOS / Manjaro | `sudo pacman -U zerotier-tray-kde-1.0.3-1-any.pkg.tar.zst` |
-| Debian / Ubuntu | `sudo apt install ./zerotier-tray-kde_1.0.3-1_all.deb` |
+| Fedora / RHEL | `sudo dnf install ./zerotier-tray-kde-1.0.4-1.fc46.noarch.rpm` |
+| Arch / CachyOS / Manjaro | `sudo pacman -U zerotier-tray-kde-1.0.4-1-any.pkg.tar.zst` |
+| Debian / Ubuntu | `sudo apt install ./zerotier-tray-kde_1.0.4-1_all.deb` |
 | anything else | `chmod +x ZeroTier-Tray-KDE-x86_64.AppImage && ./ZeroTier-Tray-KDE-x86_64.AppImage` |
 
 Needs `python3`, `PySide6`, `polkit` and `zerotier-one`. That last one is a hard
@@ -101,14 +101,22 @@ machine to any ZeroTier network. The Service tab takes it back.
 
 The helper validates everything it is handed: the user must be a real
 unprivileged account, the zone one firewalld already knows, a network ID
-sixteen hex digits. The ports it opens are read out of the running service, never
-taken from the caller.
+sixteen hex digits. The ports it opens are never taken from the caller: it is
+the primary port (`9993` unless you changed it), plus the secondary and tertiary
+only when `local.conf` pins them. Otherwise `zerotier-one` draws those two at
+random on every start, and opening one just leaves a dead hole behind after the
+next restart.
 
 ## Notes
 
 - **No tray icon yet?** Panels publish theirs some time after login, so an app
   started first can beat them to it. This one waits and appears on its own; it
   will not quit on you.
+- **Left click.** The panel draws the menu on right click. On X11 a left click
+  shows it at the cursor too; on Wayland a client cannot place a menu of its
+  own there, so a left click opens the settings window instead.
+- **Launching it again** while it runs opens the running one's window, so it is
+  reachable even with the icon hidden.
 - **Stopping the service.** `zerotier-one` sometimes dies with `SIGSEGV` on its
   way down. The daemon does stop, so the helper clears the failed state — but
   only for a death by signal or timeout. A unit that failed to *start* stays

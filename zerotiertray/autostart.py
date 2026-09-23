@@ -18,10 +18,12 @@ AUTOSTART_FILE = AUTOSTART_DIR / f"{APP_ID}.desktop"
 
 
 def _exec_command() -> str:
+    # --autostart: at login, a tray that is already up is left alone instead
+    # of being asked to open its window.
     launcher = shutil.which(APP_ID)
     if launcher:
-        return launcher
-    return f"{sys.executable} -m zerotiertray"
+        return f"{launcher} --autostart"
+    return f"{sys.executable} -m zerotiertray --autostart"
 
 
 DESKTOP = """\

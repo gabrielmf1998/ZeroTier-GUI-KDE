@@ -1,7 +1,7 @@
 %global bin zerotier-tray
 
 Name:           zerotier-tray-kde
-Version:        1.0.3
+Version:        1.0.4
 Release:        1%{?dist}
 Summary:        Unofficial tray icon to run and control ZeroTier One
 
@@ -73,6 +73,21 @@ install -Dm 0644 README.md %{buildroot}%{_datadir}/doc/%{name}/README.md
 %{_datadir}/icons/hicolor/*/apps/%{bin}.*
 
 %changelog
+* Wed Sep 23 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.4-1
+- The menu no longer freezes: it opens without waiting on firewall-cmd, is not
+  rebuilt under the pointer while open, keeps its item IDs when only a label
+  or a tick changes, and no longer leaks every submenu on each rebuild
+- The icon and tooltip are only re-sent to the panel when they change
+- A token the service rejects (401) now says so and offers to grant again,
+  instead of spinning in Starting for ever
+- The firewall switch opens only the ports that survive a restart; the random
+  secondary/tertiary ones used to pile up in firewalld
+- The settings window no longer stalls on firewall-cmd; tables stop flickering
+- Scanning for members runs in the background instead of freezing everything
+- Left click: menu at the cursor on X11, the window on Wayland
+- Launching it again opens the running one's window; "Wait in the
+  background" no longer quits; Leave in settings honours confirm_leave
+
 * Tue Sep 01 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.3-1
 - Pick the icon and the animation by looking at them: live galleries of all 26
   shapes and all 21 animations, and every state drawn at once above the tabs

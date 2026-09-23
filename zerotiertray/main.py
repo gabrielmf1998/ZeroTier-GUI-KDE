@@ -15,14 +15,44 @@ from .tray import ZeroTierTray
 from .zt import ZeroTierMonitor
 
 
-def _already_running(server_name: str) -> bool:
+# Passed by the autostart entry and the user unit: a login start that finds
+# the tray already up just leaves. Anything else is a person asking for it.
+AUTOSTART_FLAG = "--autostart"
+
+
+def _already_running(server_name: str, message: bytes) -> bool:
     probe = QLocalSocket()
     probe.connectToServer(server_name)
     if probe.waitForConnected(250):
-        probe.close()
+        if message:
+            probe.write(message)
+            probe.waitForBytesWritten(500)
+        probe.disconnectFromServer()
         return True
     QLocalServer.removeServer(server_name)
     return False
+
+
+def _listen_for_peers(guard: QLocalServer, tray: ZeroTierTray) -> None:
+    """A second launch hands over to this one and opens its window.
+
+    Without it, starting the app from the menu while it ran did nothing at
+    all - and with the icon hidden while stopped, or no menu on a Wayland left
+    click, that left no way back in.
+    """
+    def read(sock: QLocalSocket) -> None:
+        if b"show" in bytes(sock.readAll()):
+            tray.open_settings()
+
+    def accept() -> None:
+        while guard.hasPendingConnections():
+            sock = guard.nextPendingConnection()
+            sock.readyRead.connect(lambda s=sock: read(s))
+            sock.disconnected.connect(sock.deleteLater)
+            if sock.bytesAvailable():
+                read(sock)
+
+    guard.newConnection.connect(accept)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,8 +65,10 @@ def main(argv: list[str] | None = None) -> int:
     app.setWindowIcon(icons.app_icon())
     app.setQuitOnLastWindowClosed(False)
 
-    if _already_running(APP_ID):
-        print(f"{APP_NAME} is already running.", file=sys.stderr)
+    autostarted = AUTOSTART_FLAG in argv
+    if _already_running(APP_ID, b"" if autostarted else b"show\n"):
+        print(f"{APP_NAME} is already running"
+              + ("." if autostarted else "; opened its window."), file=sys.stderr)
         return 0
     guard = QLocalServer()
     guard.listen(APP_ID)
@@ -44,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = Config()
     monitor = ZeroTierMonitor(cfg)
     tray = ZeroTierTray(cfg, monitor)
+    _listen_for_peers(guard, tray)
     tray.show()
     monitor.start()
 

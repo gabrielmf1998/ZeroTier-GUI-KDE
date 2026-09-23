@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import autostart, icons, system, updates, zt
+from . import autostart, icons, updates, zt
 from . import __version__
 from .config import APP_NAME, COLOR_PRESETS, STATES
 
@@ -255,6 +255,8 @@ class SettingsDialog(QDialog):
         self._live.start(2500)
 
         monitor.changed.connect(self._refresh_live)
+        monitor.scanner.finished.connect(self._scan_done)
+        self._table_rows: dict[int, list] = {}
         self.load_from_config()
 
     # ------------------------------------------------------------ appearance
@@ -542,7 +544,7 @@ class SettingsDialog(QDialog):
         if not net:
             return
         name = net.get("name") or net.get("nwid")
-        if QMessageBox.question(
+        if self.cfg.get("confirm_leave", True) and QMessageBox.question(
                 self, APP_NAME,
                 f"Leave \"{name}\"?\n\nThe interface and its address go away.") \
                 != QMessageBox.Yes:
@@ -619,19 +621,17 @@ class SettingsDialog(QDialog):
             self._warn("Nothing to scan",
                        "No joined network has given this machine an address yet.")
             return
-        self.scan_button.setEnabled(False)
-        self.scan_button.setText("Scanning...")
-        from PySide6.QtWidgets import QApplication
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            for net in nets:
-                zt.scan_subnet(net)
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.scan_button.setEnabled(True)
-            self.scan_button.setText("Scan the subnet for members")
-        self.monitor.poll_peers()
+        self.monitor.scanner.start(nets)
+        self._sync_scan_button()
+
+    def _scan_done(self, _probed: int, _label: str) -> None:
+        self._sync_scan_button()
         self._refresh_live()
+
+    def _sync_scan_button(self) -> None:
+        busy = self.monitor.scanner.busy
+        self.scan_button.setEnabled(not busy)
+        self.scan_button.setText("Scanning..." if busy else "Scan the subnet for members")
 
     # ------------------------------------------------------------- behaviour
     def _build_behaviour(self) -> QWidget:
@@ -645,6 +645,10 @@ class SettingsDialog(QDialog):
         self.click_action.addItem("Open settings", "settings")
         self.click_action.addItem("Start or stop the service", "toggle")
         self.click_action.addItem("Do nothing", "nothing")
+        self.click_action.setToolTip(
+            "On Wayland a program cannot pop a menu up by the icon on its own, so "
+            "\"Open the menu\" opens this window there; right click always "
+            "shows the menu.")
         form.addRow("Left click", self.click_action)
 
         self.show_addresses = QCheckBox(
@@ -823,6 +827,7 @@ class SettingsDialog(QDialog):
         fform = QFormLayout(fw)
         self.fw_zone = QComboBox()
         self.fw_zone.addItem("(the default zone)", "")
+        self.fw_zone.currentIndexChanged.connect(lambda _i: self._refresh_live())
         fform.addRow("Zone", self.fw_zone)
         self.lbl_fw = QLabel("-")
         self.lbl_fw.setWordWrap(True)
@@ -922,7 +927,7 @@ class SettingsDialog(QDialog):
         self._privileged(["revoke", getpass.getuser()])
 
     def _firewall(self, open_it: bool) -> None:
-        zone = self.fw_zone.currentData() or system.firewall_default_zone()
+        zone = self.fw_zone.currentData() or self.monitor.fw.default_zone
         if not zone:
             self._warn("No zone", "firewalld did not report a usable zone.")
             return
@@ -985,12 +990,21 @@ class SettingsDialog(QDialog):
         self._sync_previews()
         self._refresh_live()
 
-    def _load_zones(self) -> None:
-        want = str(self.cfg.get("firewall_zone", ""))
+    def _load_zones(self, want: str | None = None) -> None:
+        """Fill the zone list from what firewalld said, without waiting for it.
+
+        The chosen zone always goes in, known yet or not: otherwise pressing OK
+        before firewalld has answered would quietly reset it to the default.
+        """
+        if want is None:
+            want = str(self.cfg.get("firewall_zone", ""))
+        zones = list(self.monitor.fw.zones)
+        if want and want not in zones:
+            zones.append(want)
         self.fw_zone.blockSignals(True)
         self.fw_zone.clear()
         self.fw_zone.addItem("(the default zone)", "")
-        for zone in system.firewall_zones():
+        for zone in sorted(zones):
             self.fw_zone.addItem(zone, zone)
         _set_data(self.fw_zone, want)
         self.fw_zone.blockSignals(False)
@@ -1106,7 +1120,12 @@ class SettingsDialog(QDialog):
         self.boot_box.setEnabled(snap["installed"])
         self.boot_box.blockSignals(False)
 
-        if snap["has_token"]:
+        if snap["token_rejected"]:
+            self.lbl_token.setText(
+                f"ZeroTier rejected the token in {snap['token_source']}: it no "
+                "longer matches the service's (was zerotier-one reinstalled or "
+                "reset?). Grant access again to replace it.")
+        elif snap["has_token"]:
             self.lbl_token.setText(
                 f"Reading the token from {snap['token_source']}. "
                 + ("The API is answering." if snap["api_ok"]
@@ -1115,24 +1134,35 @@ class SettingsDialog(QDialog):
             self.lbl_token.setText(
                 "No readable token. Networks and members stay blank until this "
                 "user is granted access.")
-        self.btn_grant.setEnabled(not snap["has_token"] or
+        self.btn_grant.setEnabled(not snap["has_token"] or snap["token_rejected"] or
                                   snap["token_source"] != "your config directory")
         self.btn_revoke.setEnabled(snap["token_source"] == "your config directory")
 
+        if self.fw_zone.count() <= 1 and self.monitor.fw.zones:
+            self._load_zones(self.fw_zone.currentData() or "")
         self._refresh_firewall(snap)
         self._fill_networks(snap)
         self._fill_members()
+        self._sync_scan_button()
 
-    def _refresh_firewall(self, snap: dict) -> None:
-        if not system.firewalld_running():
+    def _refresh_firewall(self, _snap: dict) -> None:
+        """From FirewallWatch's cache - this runs on every poll, and asking
+        firewall-cmd here directly kept the whole window stalling."""
+        fw = self.monitor.fw
+        zone = self.fw_zone.currentData() or fw.default_zone
+        ports = self.monitor.firewall_ports()
+        open_ports = fw.open_ports(zone, ports)
+        if fw.running is False:
             self.lbl_fw.setText("firewalld is not running, so there is nothing "
                                 "to open.")
             for b in (self.btn_fw_open, self.btn_fw_close):
                 b.setEnabled(False)
             return
-        zone = self.fw_zone.currentData() or system.firewall_default_zone()
-        ports = snap["ports"]
-        open_ports = [p for p in ports if system.firewall_port_open(zone, p)]
+        if open_ports is None:
+            self.lbl_fw.setText("Asking firewalld...")
+            for b in (self.btn_fw_open, self.btn_fw_close):
+                b.setEnabled(False)
+            return
         self.lbl_fw.setText(
             f"Zone \"{zone}\": "
             + (f"UDP {', '.join(str(p) for p in open_ports)} allowed"
@@ -1141,22 +1171,36 @@ class SettingsDialog(QDialog):
         self.btn_fw_open.setEnabled(len(open_ports) < len(ports))
         self.btn_fw_close.setEnabled(bool(open_ports))
 
+    def _fill_table(self, table: QTableWidget, rows: list[list[str]]) -> bool:
+        """Put rows in a table, unless they are what it already shows.
+
+        This runs on every poll; rewriting identical cells made the tables
+        flicker and threw away whatever the user had selected.
+        """
+        if self._table_rows.get(id(table)) == rows:
+            return False
+        self._table_rows[id(table)] = rows
+        table.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for col, value in enumerate(values):
+                table.setItem(row, col, _cell(value))
+        return True
+
     def _fill_networks(self, snap: dict) -> None:
         nets = snap["networks"]
         table = self.net_table
         keep = {i.row() for i in table.selectedIndexes()}
-        table.setRowCount(len(nets))
-        for row, net in enumerate(nets):
-            values = [
-                net.get("name") or "(unnamed)",
-                net.get("nwid", ""),
-                net.get("status", ""),
-                ", ".join(net.get("assignedAddresses") or []) or "-",
-                net.get("portDeviceName", "-"),
-                net.get("type", ""),
-            ]
-            for col, value in enumerate(values):
-                table.setItem(row, col, _cell(value))
+        changed = self._fill_table(table, [[
+            net.get("name") or "(unnamed)",
+            net.get("nwid", ""),
+            net.get("status", ""),
+            ", ".join(net.get("assignedAddresses") or []) or "-",
+            net.get("portDeviceName", "-"),
+            net.get("type", ""),
+        ] for net in nets])
+        if not changed:
+            self._sync_net_buttons()
+            return
         if keep and max(keep) < len(nets):
             table.selectRow(min(keep))
         elif nets and not keep:
@@ -1169,14 +1213,13 @@ class SettingsDialog(QDialog):
             label = net.get("name") or net.get("nwid", "")
             for mem in self.monitor.members_of(net):
                 rows.append((mem, label))
-        table = self.member_table
-        table.setRowCount(len(rows))
-        for row, (mem, label) in enumerate(rows):
+        values = []
+        for mem, label in rows:
             path = ("controller" if mem["controller"]
                     else "root" if mem["role"] in ("PLANET", "MOON")
                     else "direct" if mem["direct"]
                     else "relayed" if mem["reachable"] else "unreachable")
-            values = [
+            values.append([
                 mem["ip"] or "-",
                 mem["address"],
                 "-" if mem["latency"] < 0 else f"{mem['latency']} ms",
@@ -1184,9 +1227,8 @@ class SettingsDialog(QDialog):
                 mem["version"] or "-",
                 mem["endpoint"] or "-",
                 label,
-            ]
-            for col, value in enumerate(values):
-                table.setItem(row, col, _cell(value))
+            ])
+        self._fill_table(self.member_table, values)
 
     # -------------------------------------------------------------- previews
     def _sync_anim_gallery(self) -> None:

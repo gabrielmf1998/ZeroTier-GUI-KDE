@@ -98,27 +98,6 @@ def run_async(program: str, args: list[str], callback, parent=None,
 
 
 # --------------------------------------------------------------------------
-# systemd
-# --------------------------------------------------------------------------
-def unit_exists(unit: str) -> bool:
-    code, out, _ = run(["systemctl", "list-unit-files", unit], timeout=4)
-    return code == 0 and unit.split(".")[0] in out
-
-
-def unit_state(unit: str) -> tuple[str, str]:
-    """(ActiveState, UnitFileState) - both "" when systemctl is unavailable."""
-    code, out, _ = run(
-        ["systemctl", "show", unit, "-p", "ActiveState", "-p", "UnitFileState",
-         "--value"], timeout=4)
-    if code != 0:
-        return "", ""
-    lines = out.splitlines()
-    active = lines[0].strip() if len(lines) > 0 else ""
-    enabled = lines[1].strip() if len(lines) > 1 else ""
-    return active, enabled
-
-
-# --------------------------------------------------------------------------
 # iproute2 - the ARP/neighbour table, used to put an IP on a peer
 # --------------------------------------------------------------------------
 def neighbours(iface: str) -> dict[str, str]:
@@ -139,37 +118,6 @@ def neighbours(iface: str) -> dict[str, str]:
             continue
         out.setdefault(mac.lower(), dst)
     return out
-
-
-# --------------------------------------------------------------------------
-# firewalld
-# --------------------------------------------------------------------------
-def firewalld_running() -> bool:
-    code, out, _ = run(["firewall-cmd", "--state"], timeout=4)
-    return code == 0 and out.startswith("running")
-
-
-def firewall_zones() -> list[str]:
-    code, out, _ = run(["firewall-cmd", "--get-zones"], timeout=4)
-    return sorted(out.split()) if code == 0 else []
-
-
-def firewall_default_zone() -> str:
-    _, out, _ = run(["firewall-cmd", "--get-default-zone"], timeout=4)
-    return out
-
-
-def firewall_zone_of(iface: str) -> str:
-    if not iface:
-        return ""
-    _, out, _ = run(["firewall-cmd", "--get-zone-of-interface", iface], timeout=4)
-    return out if out and "no zone" not in out else ""
-
-
-def firewall_port_open(zone: str, port: int, proto: str = "udp") -> bool:
-    code, out, _ = run(
-        ["firewall-cmd", f"--zone={zone}", f"--query-port={port}/{proto}"], timeout=4)
-    return code == 0 and out == "yes"
 
 
 # --------------------------------------------------------------------------
