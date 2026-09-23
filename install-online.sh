@@ -30,6 +30,17 @@ done
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
+# ── can this distribution run it at all? ────────────────────
+# The tray is Python on the distribution's own PySide6. Ubuntu 24.04 and what
+# is built on it (Linux Mint 22, Pop!_OS 24.04) do not package PySide6, and apt
+# used to be "fixed" here by removing the package again - so the installer said
+# done with nothing installed. Say so first, before anything gets installed.
+if [ "$fam" = deb ]; then
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
+    apt-cache show python3-pyside6.qtwidgets >/dev/null 2>&1 \
+        || err "${PRETTY_NAME:-this distribution} does not package PySide6 (python3-pyside6.qtwidgets), which the tray runs on. Debian 13 and Ubuntu 25.04 or newer have it; Ubuntu 24.04 and its derivatives (Linux Mint 22, Pop!_OS 24.04) do not. Nothing was installed."
+fi
+
 # ── zerotier-one first ──────────────────────────────────────
 # Every package depends on it, so this has to succeed before anything else.
 # Distro packages are preferred; ZeroTier's own signed installer is the
@@ -97,9 +108,7 @@ case "$fam" in
     deb)
         pkg="$(fetch _all.deb)"
         info "installing with apt"
-        $SUDO apt-get update -qq || true
-        $SUDO apt-get install -y "$pkg" \
-            || { $SUDO dpkg -i "$pkg"; $SUDO apt-get -f install -y; } ;;
+        $SUDO apt-get install -y "$pkg" || err "apt could not install ${pkg##*/}" ;;
     arch)
         pkg="$(fetch .pkg.tar.zst)"
         info "installing with pacman"
@@ -122,6 +131,12 @@ DESKTOP
         info "the AppImage needs python3 + PySide6 on the system"
         warn "the AppImage cannot ship the polkit helper, so starting the"
         warn "service and opening the firewall will not work from it" ;;
+esac
+
+case "$fam" in
+    rpm|deb|arch)
+        command -v zerotier-tray >/dev/null 2>&1 \
+            || err "the package manager finished, but zerotier-tray is not installed" ;;
 esac
 
 info "done — run it with:  zerotier-tray"

@@ -35,6 +35,11 @@ dependency — a tray for a daemon that is not there is useless. Arch has it in
 all, which is why the installer falls back to ZeroTier's own signed installer
 and says so before it runs it.
 
+PySide6 comes from the distribution too: Debian 13 and Ubuntu 25.04 or newer
+(26.04 LTS included) have it. **Ubuntu 24.04 does not**, nor what is built on it (Linux Mint 22,
+Pop!_OS 24.04), so the tray cannot run there yet; the installer says so up
+front instead of installing half of it.
+
 Then launch **ZeroTier Tray**, and pick **Grant access to ZeroTier** once so it
 stops asking for a password.
 
