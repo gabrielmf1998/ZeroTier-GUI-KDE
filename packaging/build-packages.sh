@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Builds every package into dist/:  .rpm (Fedora), .deb (Debian/Ubuntu),
-# .pkg.tar.zst (Arch) and an .AppImage (thin: uses the system python3+PySide6).
+# Builds every package into dist/:  .rpm (Fedora), .deb (Debian/Ubuntu), the
+# zerotier-tray-kde-pyside6 .deb for the ones that package no PySide6,
+# .pkg.tar.zst (Arch) and an .AppImage (the system's python3, and its PySide6
+# when it has one - otherwise the copy inside).
 set -euo pipefail
 
 NAME=zerotier-tray-kde
 BIN=zerotier-tray
-VERSION=1.0.4
+VERSION=1.0.5
 RELEASE=1
 MAINT="Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com>"
 URL="https://github.com/gabrielmf1998/ZeroTier-GUI-KDE"
@@ -44,8 +46,17 @@ say "source tarball"
 SRCDIR="$WORK/$NAME-$VERSION"; mkdir -p "$SRCDIR"
 cp -r "$ROOT"/{zerotiertray,helper,polkit,assets,packaging,systemd,docs,LICENSE,README.md,install.sh,install-online.sh} "$SRCDIR/"
 rm -rf "$SRCDIR/zerotiertray/__pycache__" "$SRCDIR/packaging/build-packages.sh" \
-       "$SRCDIR/assets/gen_icons.py"
+       "$SRCDIR/packaging/bundle-pyside6.py" "$SRCDIR/assets/gen_icons.py"
 tar -C "$WORK" -czf "$WORK/$NAME-$VERSION.tar.gz" "$NAME-$VERSION"
+
+# ── a PySide6 for distributions without one ─────────────────
+# Ubuntu 24.04 and its derivatives, and Debian 12, package none. The official
+# wheel, pinned and hash-checked, trimmed to what the tray uses; it goes into
+# its own .deb and into the AppImage. See packaging/bundle-pyside6.py.
+say "bundled PySide6"
+PYSIDE="$WORK/pyside6"
+python3 "$ROOT/packaging/bundle-pyside6.py" "$PYSIDE"
+PYSIDE_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$ROOT/packaging/bundle-pyside6.py")"
 
 # ── RPM ─────────────────────────────────────────────────────
 if command -v rpmbuild >/dev/null; then
@@ -71,7 +82,7 @@ Maintainer: $MAINT
 Section: net
 Priority: optional
 Homepage: $URL
-Depends: python3, python3-pyside6.qtwidgets, python3-pyside6.qtnetwork, policykit-1 | polkitd, systemd, zerotier-one
+Depends: python3, python3-pyside6.qtwidgets | $NAME-pyside6, python3-pyside6.qtnetwork | $NAME-pyside6, policykit-1 | polkitd, systemd, zerotier-one
 Recommends: firewalld, iproute2, iputils-ping
 Description: $SUMMARY
  An unofficial, non-affiliated tray GUI for ZeroTier One. Not made, endorsed or
@@ -92,6 +103,36 @@ Description: $SUMMARY
  animation per state, and a count badge for how many members are reachable.
 CONTROL
     dpkg-deb --root-owner-group --build "$DEB" "$DIST/${NAME}_${VERSION}-${RELEASE}_all.deb" >/dev/null
+
+    say "DEB (bundled PySide6 $PYSIDE_VERSION)"
+    RT="$WORK/deb-pyside6"
+    install -d "$RT/usr/lib/$NAME/pyside6" "$RT/usr/share/doc/$NAME-pyside6" "$RT/DEBIAN"
+    cp -r "$PYSIDE/PySide6" "$PYSIDE/shiboken6" "$RT/usr/lib/$NAME/pyside6/"
+    install -m 0644 "$PYSIDE/copyright" "$RT/usr/share/doc/$NAME-pyside6/copyright"
+    cat > "$RT/DEBIAN/control" <<CONTROL
+Package: $NAME-pyside6
+Version: $PYSIDE_VERSION-1
+Architecture: amd64
+Maintainer: $MAINT
+Installed-Size: $(du -sk "$RT/usr" | cut -f1)
+Section: python
+Priority: optional
+Homepage: $URL
+Depends: python3 (>= 3.9), libc6 (>= 2.34), libstdc++6, libgcc-s1, libglib2.0-0t64 | libglib2.0-0, libdbus-1-3, libgl1, libegl1, libfontconfig1, libfreetype6, libbrotli1, zlib1g, libzstd1, libgssapi-krb5-2, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-util1, libxcb-xfixes0, libxcb-xkb1, libwayland-client0, libwayland-cursor0
+Recommends: libssl3t64 | libssl3
+Description: PySide6 $PYSIDE_VERSION for ZeroTier Tray, where the distribution has none
+ Ubuntu 24.04 and what is built on it (Kubuntu, KDE neon, Linux Mint 22,
+ Pop!_OS 24.04), and Debian 12, do not package PySide6. This is the official
+ Qt for Python $PYSIDE_VERSION wheel, unmodified, trimmed to what ZeroTier Tray
+ uses: QtCore, QtGui, QtWidgets, QtNetwork and QtDBus, with the xcb and
+ Wayland platform plugins.
+ .
+ It lives in /usr/lib/$NAME/pyside6, off Python's path. Only
+ $NAME picks it up, and only when the distribution offers no PySide6
+ of its own.
+CONTROL
+    dpkg-deb -Zxz --root-owner-group --build "$RT" \
+        "$DIST/${NAME}-pyside6_${PYSIDE_VERSION}-1_amd64.deb" >/dev/null
 fi
 
 # ── Arch ────────────────────────────────────────────────────
@@ -139,19 +180,19 @@ if [ -n "$AT" ]; then
     install -d "$APPDIR/usr/share/$NAME/zerotiertray"
     install -m 0644 "$ROOT"/zerotiertray/*.py "$APPDIR/usr/share/$NAME/zerotiertray/"
     install -Dm 0755 "$ROOT/helper/$BIN-helper" "$APPDIR/usr/libexec/$BIN-helper"
+    install -d "$APPDIR/usr/lib/$NAME/pyside6"
+    cp -r "$PYSIDE/PySide6" "$PYSIDE/shiboken6" "$PYSIDE/copyright" "$APPDIR/usr/lib/$NAME/pyside6/"
     install -Dm 0644 "$ROOT/assets/$BIN-256.png" "$APPDIR/$BIN.png"
     install -Dm 0644 "$ROOT/assets/$BIN-256.png" \
         "$APPDIR/usr/share/icons/hicolor/256x256/apps/$BIN.png"
     install -Dm 0644 "$ROOT/packaging/$BIN.desktop" "$APPDIR/$BIN.desktop"
     cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/bin/sh
-# ZeroTier Tray AppImage launcher: a thin wrapper around system python3+PySide6.
+# ZeroTier Tray AppImage launcher: the system's python3, and its PySide6 when
+# it has one - otherwise the copy inside this image (Qt for Python, trimmed).
 HERE="$(dirname "$(readlink -f "$0")")"
-if ! python3 -c "import PySide6.QtWidgets" 2>/dev/null; then
-    echo "ZeroTier Tray needs PySide6 installed on the system:" >&2
-    echo "  Fedora: sudo dnf install python3-pyside6" >&2
-    echo "  Debian/Ubuntu: sudo apt install python3-pyside6.qtwidgets" >&2
-    echo "  Arch: sudo pacman -S pyside6" >&2
+if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+    echo "ZeroTier Tray needs python3, 3.9 or newer, on the system." >&2
     exit 1
 fi
 # The privileged helper cannot live inside the image: pkexec will only run a
@@ -177,6 +218,6 @@ else
 fi
 
 # ── checksums ───────────────────────────────────────────────
-( cd "$DIST" && sha256sum ./*.rpm ./*.deb ./*.pkg.tar.zst ./*.AppImage > SHA256SUMS 2>/dev/null || true )
+( cd "$DIST" && sha256sum ./*.rpm ./*_all.deb ./*_amd64.deb ./*.pkg.tar.zst ./*.AppImage > SHA256SUMS 2>/dev/null || true )
 say "done. Artifacts in dist/:"
 ls -1sh "$DIST"

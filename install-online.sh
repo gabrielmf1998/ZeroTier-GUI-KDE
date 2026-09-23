@@ -30,15 +30,20 @@ done
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
-# ── can this distribution run it at all? ────────────────────
-# The tray is Python on the distribution's own PySide6. Ubuntu 24.04 and what
-# is built on it (Linux Mint 22, Pop!_OS 24.04) do not package PySide6, and apt
-# used to be "fixed" here by removing the package again - so the installer said
-# done with nothing installed. Say so first, before anything gets installed.
+# ── does the distribution have PySide6? ────────────────────
+# The tray runs on the distribution's own PySide6 where there is one. Ubuntu
+# 24.04 and what is built on it (Kubuntu, KDE neon, Linux Mint 22, Pop!_OS
+# 24.04) and Debian 12 have none; there the tray brings its own, as a second
+# package. Decided up front, before anything gets installed.
+BUNDLED_PYSIDE6=""
 if [ "$fam" = deb ]; then
     $SUDO apt-get update -qq >/dev/null 2>&1 || true
-    apt-cache show python3-pyside6.qtwidgets >/dev/null 2>&1 \
-        || err "${PRETTY_NAME:-this distribution} does not package PySide6 (python3-pyside6.qtwidgets), which the tray runs on. Debian 13 and Ubuntu 25.04 or newer have it; Ubuntu 24.04 and its derivatives (Linux Mint 22, Pop!_OS 24.04) do not. Nothing was installed."
+    if ! apt-cache show python3-pyside6.qtwidgets >/dev/null 2>&1; then
+        [ "$(dpkg --print-architecture)" = amd64 ] \
+            || err "${PRETTY_NAME:-this distribution} packages no PySide6, and the copy the tray can bring along is for x86-64 only. Nothing was installed."
+        BUNDLED_PYSIDE6=1
+        info "${PRETTY_NAME:-this distribution} packages no PySide6; the tray brings its own (zerotier-tray-kde-pyside6)"
+    fi
 fi
 
 # ── zerotier-one first ──────────────────────────────────────
@@ -107,8 +112,10 @@ case "$fam" in
         $SUDO dnf install -y "$pkg" ;;
     deb)
         pkg="$(fetch _all.deb)"
+        set -- "$pkg"
+        [ -n "$BUNDLED_PYSIDE6" ] && set -- "$pkg" "$(fetch _amd64.deb)"
         info "installing with apt"
-        $SUDO apt-get install -y "$pkg" || err "apt could not install ${pkg##*/}" ;;
+        $SUDO apt-get install -y "$@" || err "apt could not install ${pkg##*/}" ;;
     arch)
         pkg="$(fetch .pkg.tar.zst)"
         info "installing with pacman"
@@ -128,7 +135,7 @@ Icon=network-vpn
 Terminal=false
 Categories=Network;Utility;
 DESKTOP
-        info "the AppImage needs python3 + PySide6 on the system"
+        info "the AppImage uses the system's python3 (3.9+), and brings PySide6 if the system has none"
         warn "the AppImage cannot ship the polkit helper, so starting the"
         warn "service and opening the firewall will not work from it" ;;
 esac

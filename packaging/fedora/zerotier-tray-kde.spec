@@ -1,7 +1,7 @@
 %global bin zerotier-tray
 
 Name:           zerotier-tray-kde
-Version:        1.0.4
+Version:        1.0.5
 Release:        1%{?dist}
 Summary:        Unofficial tray icon to run and control ZeroTier One
 
@@ -73,6 +73,13 @@ install -Dm 0644 README.md %{buildroot}%{_datadir}/doc/%{name}/README.md
 %{_datadir}/icons/hicolor/*/apps/%{bin}.*
 
 %changelog
+* Wed Sep 23 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.5-1
+- Runs where the distribution has no PySide6 (Ubuntu 22.04/24.04 and their
+  derivatives, Debian 12): a zerotier-tray-kde-pyside6 .deb with the official
+  wheel trimmed to what the tray uses, installed only where needed; the
+  AppImage carries the same copy
+- The distribution's own PySide6 always wins when there is one
+
 * Wed Sep 23 2026 Gabriel Marques Ferrarezi <110578985+gabrielmf1998@users.noreply.github.com> - 1.0.4-1
 - The menu no longer freezes: it opens without waiting on firewall-cmd, is not
   rebuilt under the pointer while open, keeps its item IDs when only a label

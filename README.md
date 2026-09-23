@@ -24,9 +24,10 @@ starts it. The same line upgrades an existing install. Or take a package from
 
 | Distro | Command |
 |---|---|
-| Fedora / RHEL | `sudo dnf install ./zerotier-tray-kde-1.0.4-1.fc46.noarch.rpm` |
-| Arch / CachyOS / Manjaro | `sudo pacman -U zerotier-tray-kde-1.0.4-1-any.pkg.tar.zst` |
-| Debian / Ubuntu | `sudo apt install ./zerotier-tray-kde_1.0.4-1_all.deb` |
+| Fedora / RHEL | `sudo dnf install ./zerotier-tray-kde-1.0.5-1.fc46.noarch.rpm` |
+| Arch / CachyOS / Manjaro | `sudo pacman -U zerotier-tray-kde-1.0.5-1-any.pkg.tar.zst` |
+| Debian 13, Ubuntu 25.04+ | `sudo apt install ./zerotier-tray-kde_1.0.5-1_all.deb` |
+| Ubuntu 22.04 / 24.04, Kubuntu, KDE neon, Mint, Pop!_OS, Debian 12 | `sudo apt install ./zerotier-tray-kde_1.0.5-1_all.deb ./zerotier-tray-kde-pyside6_6.10.3-1_amd64.deb` |
 | anything else | `chmod +x ZeroTier-Tray-KDE-x86_64.AppImage && ./ZeroTier-Tray-KDE-x86_64.AppImage` |
 
 Needs `python3`, `PySide6`, `polkit` and `zerotier-one`. That last one is a hard
@@ -35,10 +36,13 @@ dependency — a tray for a daemon that is not there is useless. Arch has it in
 all, which is why the installer falls back to ZeroTier's own signed installer
 and says so before it runs it.
 
-PySide6 comes from the distribution too: Debian 13 and Ubuntu 25.04 or newer
-(26.04 LTS included) have it. **Ubuntu 24.04 does not**, nor what is built on it (Linux Mint 22,
-Pop!_OS 24.04), so the tray cannot run there yet; the installer says so up
-front instead of installing half of it.
+PySide6 comes from the distribution where it has one: Fedora, Arch, Debian 13,
+Ubuntu 25.04 and newer. Ubuntu 22.04 and 24.04 and everything built on them
+(Kubuntu, KDE neon, Linux Mint, Pop!_OS), and Debian 12, have none; there the
+tray brings its own, `zerotier-tray-kde-pyside6`: the official Qt for Python
+wheel, unmodified, cut down to the five modules the tray uses and kept off
+Python's path. The installer adds it only where it is needed, and the AppImage
+carries it too.
 
 Then launch **ZeroTier Tray**, and pick **Grant access to ZeroTier** once so it
 stops asking for a password.
